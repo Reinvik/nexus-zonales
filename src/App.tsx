@@ -287,6 +287,67 @@ export default function App() {
     }
   };
 
+  // Guardar Ajustes / Reconteos de Diferencias del Supervisor en Supabase
+  const handleSaveSupervisorRevisions = async (
+    fecha: string,
+    newRevisions: Record<string, any>,
+    updatedTotales?: CiclicoTotales
+  ): Promise<boolean> => {
+    try {
+      const { data: currentEntry } = await supabase
+        .from('zonales_inventario_ciclico_historial')
+        .select('*')
+        .eq('fecha', fecha)
+        .maybeSingle();
+
+      const existingResumen = currentEntry?.resumen_json || {};
+      const updatedResumen = {
+        ...existingResumen,
+        supervisor_revisions: newRevisions,
+        ...(updatedTotales ? {
+          monto_negativo: updatedTotales.monto_negativo,
+          monto_positivo: updatedTotales.monto_positivo,
+          monto_total_bruto: updatedTotales.monto_total_bruto,
+          monto_total_conciliado: updatedTotales.monto_total_conciliado,
+          monto_final_descuadre: updatedTotales.monto_final_descuadre,
+          total_faltantes_sku: updatedTotales.total_faltantes,
+          total_sobrantes_sku: updatedTotales.total_sobrantes,
+          total_cuadrados: updatedTotales.total_cuadrados
+        } : {}),
+        ultimo_ajuste_por: currentUser.nombre,
+        fecha_ultimo_ajuste: new Date().toISOString()
+      };
+
+      const updatePayload: Record<string, any> = {
+        resumen_json: updatedResumen
+      };
+
+      if (updatedTotales) {
+        updatePayload.diferencia_neta = updatedTotales.diferencia_neta;
+        updatePayload.dif_precio_total = updatedTotales.dif_precio_total;
+        updatePayload.items_con_diferencia = updatedTotales.total_faltantes + updatedTotales.total_sobrantes;
+        updatePayload.sobrantes_conciliados_999 = updatedTotales.sobrantes_conciliados_999;
+        updatePayload.sobrantes_conciliados_sdif = updatedTotales.sobrantes_conciliados_sdif;
+      }
+
+      const { error } = await supabase
+        .from('zonales_inventario_ciclico_historial')
+        .update(updatePayload)
+        .eq('fecha', fecha);
+
+      if (error) {
+        console.error('Error actualizando ajustes en Supabase:', error);
+        return false;
+      }
+
+      await fetchCiclicoHistorial();
+      return true;
+    } catch (err) {
+      console.error('Error general guardando ajustes:', err);
+      return false;
+    }
+  };
+
   useEffect(() => {
     fetchUsers();
     fetchDeviations();
@@ -663,6 +724,7 @@ export default function App() {
             ciclicoHistorial={ciclicoHistorial}
             isLoadingHistorial={isLoadingCiclicoHistorial}
             onSaveCiclicoDelDia={handleSaveCiclicoDelDia}
+            onSaveSupervisorRevisions={handleSaveSupervisorRevisions}
             onRefreshCiclicoHistorial={fetchCiclicoHistorial}
           />
         )}

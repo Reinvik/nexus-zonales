@@ -77,6 +77,7 @@ interface CiclicoViewProps {
     totales: CiclicoTotales;
     itemsConsolidados: InventarioItemConsolidado[];
   }) => Promise<boolean>;
+  onSaveSupervisorRevisions?: (fecha: string, newRevisions: Record<string, any>, updatedTotales?: CiclicoTotales) => Promise<boolean>;
   onRefreshCiclicoHistorial?: () => Promise<void>;
 }
 
@@ -90,6 +91,7 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   ciclicoHistorial = [],
   isLoadingHistorial = false,
   onSaveCiclicoDelDia,
+  onSaveSupervisorRevisions,
   onRefreshCiclicoHistorial
 }) => {
   // 1. Navegación entre Sub-Pestañas: Resultado Cíclico vs MB52 Externos
@@ -175,14 +177,31 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   const [parsedPreviewMb52, setParsedPreviewMb52] = useState<CiclicoItem[]>([]);
   const [parseErrorsMb52, setParseErrorsMb52] = useState<string[]>([]);
 
-  // Estados para la Revisión / Auditoría en Tablet del Supervisor (Top N SKUs con más diferencias)
-  const [supervisorRevisions, setSupervisorRevisions] = useState<Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string }>>(() => {
+  // Estados para la Revisión / Auditoría y Ajuste de Diferencias
+  const [supervisorRevisions, setSupervisorRevisions] = useState<Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string; fecha_revision?: string }>>(() => {
     const cached = localStorage.getItem('nexus_supervisor_revisions');
     return cached ? JSON.parse(cached) : {};
   });
   const [isTabletReviewOpen, setIsTabletReviewOpen] = useState<boolean>(false);
   const [topNCount, setTopNCount] = useState<number>(10);
   const [draftRevisions, setDraftRevisions] = useState<Record<string, { cant_contada: number; notas?: string }>>({});
+
+  // Estados para Modal de Ajuste Individual por SKU
+  const [adjustingItem, setAdjustingItem] = useState<InventarioItemConsolidado | null>(null);
+  const [adjustCantContada, setAdjustCantContada] = useState<number>(0);
+  const [adjustNotas, setAdjustNotas] = useState<string>('');
+  const [isSavingAdjustment, setIsSavingAdjustment] = useState<boolean>(false);
+
+  // Sincronizar ajustes del supervisor cuando se cambia de fecha o se recibe el historial de la nube
+  useEffect(() => {
+    if (activeHistorialItem?.resumen_json?.supervisor_revisions) {
+      setSupervisorRevisions(activeHistorialItem.resumen_json.supervisor_revisions);
+      localStorage.setItem('nexus_supervisor_revisions', JSON.stringify(activeHistorialItem.resumen_json.supervisor_revisions));
+    } else {
+      setSupervisorRevisions({});
+      localStorage.removeItem('nexus_supervisor_revisions');
+    }
+  }, [selectedFecha, activeHistorialItem]);
 
   // 3. Procesamiento y Consolidación Automática del Cíclico con 999 y SDIF (+ Reconteo Supervisor)
   const { itemsConsolidados, metadataCiclico, totalesCiclico } = useMemo(() => {
@@ -488,27 +507,126 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     }));
   };
 
-  // Aplicar Reconteos del Supervisor
-  const handleApplySupervisorRevisions = () => {
+  // Abrir Modal de Ajuste para un SKU específico
+  const handleOpenAdjustModal = (item: InventarioItemConsolidado) => {
+    setAdjustingItem(item);
+    const existingRev = supervisorRevisions[item.sku];
+    setAdjustCantContada(existingRev !== undefined ? existingRev.cant_contada : item.cant_contada);
+    setAdjustNotas(existingRev?.notas || '');
+  };
+
+  // Guardar Ajuste Individual de SKU en la Nube
+  const handleSaveItemAdjustment = async () => {
+    if (!adjustingItem) return;
+    setIsSavingAdjustment(true);
+
+    const newRevisions = {
+      ...supervisorRevisions,
+      [adjustingItem.sku]: {
+        cant_contada: Number(adjustCantContada),
+        notas: adjustNotas.trim(),
+        supervisor_nombre: currentUser?.nombre || 'Supervisor CD',
+        fecha_revision: new Date().toLocaleTimeString('es-CL')
+      }
+    };
+
+    setSupervisorRevisions(newRevisions);
+    localStorage.setItem('nexus_supervisor_revisions', JSON.stringify(newRevisions));
+
+    if (onSaveSupervisorRevisions) {
+      const { rows: ciclicoRows } = parseCiclicoRawText(rawCiclico);
+      const rows999 = items.filter(i => i.almacen === '999').map(i => ({
+        sku: i.material, centro: 'SGSJ', almacen: '999', lote: i.lote,
+        descripcion: i.texto_breve, stock_disponible: i.cantidad, um: i.umb, ubicacion: 'CD'
+      }));
+      const rowsSdif = items.filter(i => i.almacen === 'SDIF').map(i => ({
+        sku: i.material, descripcion: i.texto_breve, libre_util: i.cantidad,
+        um: i.umb, lote: i.lote, almacen: 'SDIF', valor: i.valor_total, zonal_estimada: i.zonal
+      }));
+      const consolidado = consolidarInventario(ciclicoRows, rows999, rowsSdif, products, newRevisions);
+      await onSaveSupervisorRevisions(selectedFecha, newRevisions, consolidado.totales as CiclicoTotales);
+    }
+
+    setIsSavingAdjustment(false);
+    setAdjustingItem(null);
+    confetti({ particleCount: 60, spread: 60, origin: { y: 0.6 } });
+  };
+
+  // Revertir o Eliminar Ajuste de un SKU específico
+  const handleRemoveItemAdjustment = async (sku: string) => {
+    const newRevisions = { ...supervisorRevisions };
+    delete newRevisions[sku];
+    setSupervisorRevisions(newRevisions);
+    localStorage.setItem('nexus_supervisor_revisions', JSON.stringify(newRevisions));
+
+    if (onSaveSupervisorRevisions) {
+      const { rows: ciclicoRows } = parseCiclicoRawText(rawCiclico);
+      const rows999 = items.filter(i => i.almacen === '999').map(i => ({
+        sku: i.material, centro: 'SGSJ', almacen: '999', lote: i.lote,
+        descripcion: i.texto_breve, stock_disponible: i.cantidad, um: i.umb, ubicacion: 'CD'
+      }));
+      const rowsSdif = items.filter(i => i.almacen === 'SDIF').map(i => ({
+        sku: i.material, descripcion: i.texto_breve, libre_util: i.cantidad,
+        um: i.umb, lote: i.lote, almacen: 'SDIF', valor: i.valor_total, zonal_estimada: i.zonal
+      }));
+      const consolidado = consolidarInventario(ciclicoRows, rows999, rowsSdif, products, newRevisions);
+      await onSaveSupervisorRevisions(selectedFecha, newRevisions, consolidado.totales as CiclicoTotales);
+    }
+    setAdjustingItem(null);
+  };
+
+  // Aplicar Reconteos del Supervisor desde la Tablet (Persistido en la Nube)
+  const handleApplySupervisorRevisions = async () => {
     const newRevisions = { ...supervisorRevisions };
     Object.entries(draftRevisions).forEach(([sku, rev]) => {
       newRevisions[sku] = {
         cant_contada: Number(rev.cant_contada),
         notas: rev.notas?.trim(),
-        supervisor_nombre: currentUser?.nombre || 'Supervisor CD'
+        supervisor_nombre: currentUser?.nombre || 'Supervisor CD',
+        fecha_revision: new Date().toLocaleTimeString('es-CL')
       };
     });
     setSupervisorRevisions(newRevisions);
     localStorage.setItem('nexus_supervisor_revisions', JSON.stringify(newRevisions));
+
+    if (onSaveSupervisorRevisions) {
+      const { rows: ciclicoRows } = parseCiclicoRawText(rawCiclico);
+      const rows999 = items.filter(i => i.almacen === '999').map(i => ({
+        sku: i.material, centro: 'SGSJ', almacen: '999', lote: i.lote,
+        descripcion: i.texto_breve, stock_disponible: i.cantidad, um: i.umb, ubicacion: 'CD'
+      }));
+      const rowsSdif = items.filter(i => i.almacen === 'SDIF').map(i => ({
+        sku: i.material, descripcion: i.texto_breve, libre_util: i.cantidad,
+        um: i.umb, lote: i.lote, almacen: 'SDIF', valor: i.valor_total, zonal_estimada: i.zonal
+      }));
+      const consolidado = consolidarInventario(ciclicoRows, rows999, rowsSdif, products, newRevisions);
+      await onSaveSupervisorRevisions(selectedFecha, newRevisions, consolidado.totales as CiclicoTotales);
+    }
+
     setIsTabletReviewOpen(false);
     confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
   };
 
   // Deshacer / Restablecer Conteo Original
-  const handleClearSupervisorRevisions = () => {
+  const handleClearSupervisorRevisions = async () => {
     if (window.confirm('¿Deseas eliminar las modificaciones de reconteo del supervisor y volver al 1er conteo original del cíclico?')) {
       setSupervisorRevisions({});
       localStorage.removeItem('nexus_supervisor_revisions');
+
+      if (onSaveSupervisorRevisions) {
+        const { rows: ciclicoRows } = parseCiclicoRawText(rawCiclico);
+        const rows999 = items.filter(i => i.almacen === '999').map(i => ({
+          sku: i.material, centro: 'SGSJ', almacen: '999', lote: i.lote,
+          descripcion: i.texto_breve, stock_disponible: i.cantidad, um: i.umb, ubicacion: 'CD'
+        }));
+        const rowsSdif = items.filter(i => i.almacen === 'SDIF').map(i => ({
+          sku: i.material, descripcion: i.texto_breve, libre_util: i.cantidad,
+          um: i.umb, lote: i.lote, almacen: 'SDIF', valor: i.valor_total, zonal_estimada: i.zonal
+        }));
+        const consolidado = consolidarInventario(ciclicoRows, rows999, rowsSdif, products, {});
+        await onSaveSupervisorRevisions(selectedFecha, {}, consolidado.totales as CiclicoTotales);
+      }
+
       confetti({ particleCount: 30, spread: 50 });
     }
   };
@@ -1145,12 +1263,13 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                     <th className="p-3 text-right">Dif. Precio ($)</th>
                     <th className="p-3 text-center">Estado</th>
                     <th className="p-3">Conciliación CD / Zonales</th>
+                    <th className="p-3 text-center">Ajustar</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-sans">
                   {filteredCiclicoItems.length === 0 ? (
                     <tr>
-                      <td colSpan={11} className="p-8 text-center text-slate-400">
+                      <td colSpan={12} className="p-8 text-center text-slate-400">
                         No se encontraron productos para los filtros seleccionados.
                       </td>
                     </tr>
@@ -1222,16 +1341,23 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
                             {/* Diferencia CJ y UN */}
                             <td className="p-3 text-right whitespace-nowrap">
-                              <span className={`font-mono font-black ${
-                                item.diferencia < 0 ? 'text-rose-600' : (item.diferencia > 0 ? 'text-blue-600' : 'text-slate-500')
-                              }`}>
-                                {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia} {item.factor_empaque === 1 ? 'UN' : 'CJ'}
-                              </span>
-                              {item.diferencia !== 0 && item.factor_empaque > 1 && (
-                                <span className="block text-[10px] text-slate-400 font-mono">
-                                  {item.diferencia_unidades > 0 ? `+${item.diferencia_unidades}` : item.diferencia_unidades} UN
+                              <button
+                                type="button"
+                                onClick={() => handleOpenAdjustModal(item)}
+                                className="group/dif text-right block ml-auto cursor-pointer"
+                                title="Haz clic para ajustar la diferencia de este SKU"
+                              >
+                                <span className={`font-mono font-black group-hover/dif:underline ${
+                                  item.diferencia < 0 ? 'text-rose-600' : (item.diferencia > 0 ? 'text-blue-600' : 'text-slate-500')
+                                }`}>
+                                  {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia} {item.factor_empaque === 1 ? 'UN' : 'CJ'}
                                 </span>
-                              )}
+                                {item.diferencia !== 0 && item.factor_empaque > 1 && (
+                                  <span className="block text-[10px] text-slate-400 font-mono">
+                                    {item.diferencia_unidades > 0 ? `+${item.diferencia_unidades}` : item.diferencia_unidades} UN
+                                  </span>
+                                )}
+                              </button>
                             </td>
 
                             {/* Precio */}
@@ -1286,12 +1412,31 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                               </div>
                             </td>
 
+                            {/* Botón Acción Ajustar */}
+                            <td className="p-3 text-center whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenAdjustModal(item)}
+                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-black transition-all active:scale-95 cursor-pointer shadow-2xs ${
+                                  item.revisado_supervisor
+                                    ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300'
+                                    : (item.diferencia !== 0 
+                                        ? 'bg-slate-900 hover:bg-slate-800 text-white hover:shadow-xs'
+                                        : 'bg-slate-100 hover:bg-slate-200 text-slate-600')
+                                }`}
+                                title="Ajustar o regularizar diferencia de este producto"
+                              >
+                                <SlidersHorizontal className="w-3.5 h-3.5" />
+                                <span>{item.revisado_supervisor ? 'Ajustado' : 'Ajustar'}</span>
+                              </button>
+                            </td>
+
                           </tr>
 
                           {/* Detalle Expandido de Lotes y Auditoría */}
                           {isExpanded && (item.lotes_desglose.length > 0 || item.revisado_supervisor) && (
                             <tr className="bg-slate-50/90 border-y border-slate-200">
-                              <td colSpan={11} className="p-4 pl-12">
+                              <td colSpan={12} className="p-4 pl-12">
                                 {/* Banner de Auditoría del Supervisor si fue revisado */}
                                 {item.revisado_supervisor && item.revision_supervisor && (
                                   <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
@@ -1317,14 +1462,24 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                                         )}
                                       </div>
                                     </div>
-                                    <button
-                                      type="button"
-                                      onClick={handleOpenTabletReview}
-                                      className="inline-flex items-center gap-1 px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold text-xs rounded-lg transition-colors cursor-pointer shrink-0 self-start sm:self-auto shadow-2xs"
-                                    >
-                                      <Edit3 className="w-3.5 h-3.5" />
-                                      <span>Editar en Tablet</span>
-                                    </button>
+                                    <div className="flex items-center gap-2 shrink-0 self-start sm:self-auto">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleOpenAdjustModal(item)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white font-black text-xs rounded-lg transition-colors cursor-pointer shadow-2xs"
+                                      >
+                                        <SlidersHorizontal className="w-3.5 h-3.5" />
+                                        <span>Ajustar este SKU</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={handleOpenTabletReview}
+                                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold text-xs rounded-lg transition-colors cursor-pointer shadow-2xs"
+                                      >
+                                        <Edit3 className="w-3.5 h-3.5" />
+                                        <span>Ver en Tablet</span>
+                                      </button>
+                                    </div>
                                   </div>
                                 )}
 
@@ -2083,6 +2238,297 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                 >
                   <Save className="w-4 h-4 text-white" />
                   <span>Aplicar Revisión y Conciliar</span>
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 4: AJUSTAR DIFERENCIA POR SKU (INDIVIDUAL)                          */}
+      {/* ========================================================================= */}
+      {adjustingItem && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-xl w-full flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-slate-900 text-white rounded-xl shadow-xs">
+                  <SlidersHorizontal className="w-5 h-5 text-emerald-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-extrabold text-slate-900">
+                      Ajustar Diferencia de Inventario
+                    </h3>
+                    <span className="font-mono text-xs font-black bg-slate-100 text-slate-800 px-2 py-0.5 rounded-md border border-slate-200">
+                      SKU {adjustingItem.sku}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 truncate max-w-sm" title={adjustingItem.descripcion}>
+                    {adjustingItem.descripcion}
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setAdjustingItem(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+              {/* Pills Informativas */}
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-mono font-bold">
+                  <MapPin className="w-3.5 h-3.5 text-slate-500" />
+                  Ubicación: {adjustingItem.ubicacion || 'Sin Ubic.'}
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-mono font-bold">
+                  Precio: ${adjustingItem.precio_unitario.toLocaleString('es-CL')} / CJ
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-bold">
+                  Factor: {adjustingItem.factor_empaque} UN/CJ
+                </span>
+              </div>
+
+              {/* Grilla Comparativa de Cantidades */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {/* 1. Sistema SAP */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                    1. Sistema SAP
+                  </span>
+                  <div className="text-2xl font-black font-mono text-slate-800 my-1">
+                    {adjustingItem.cant_sistema}
+                  </div>
+                  <span className="text-[10px] text-slate-400">
+                    {adjustingItem.factor_empaque === 1 ? 'Unidades' : 'Cajas teóricas'}
+                  </span>
+                </div>
+
+                {/* 2. Conteo Original */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                    2. 1er Conteo Operador
+                  </span>
+                  <div className="text-2xl font-black font-mono text-slate-700 my-1">
+                    {adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada}
+                  </div>
+                  {(() => {
+                    const origCount = adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada;
+                    const origDif = origCount - adjustingItem.cant_sistema;
+                    return (
+                      <span className={`text-[10px] font-mono font-bold ${
+                        origDif < 0 ? 'text-rose-600' : (origDif > 0 ? 'text-blue-600' : 'text-emerald-600')
+                      }`}>
+                        Dif orig: {origDif > 0 ? `+${origDif}` : origDif} CJ
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                {/* 3. Cantidad Ajustada (Stepper) */}
+                <div className="p-3 bg-indigo-50/70 border-2 border-indigo-400 rounded-xl text-center flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-indigo-950 tracking-wider">
+                    3. Conteo Físico Ajustado
+                  </span>
+                  <div className="flex items-center justify-center gap-1.5 my-1">
+                    <button
+                      type="button"
+                      onClick={() => setAdjustCantContada(prev => Math.max(0, prev - 1))}
+                      className="w-8 h-8 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                    >
+                      <Minus className="w-4 h-4" />
+                    </button>
+                    <input
+                      type="number"
+                      min="0"
+                      value={isNaN(adjustCantContada) ? '' : adjustCantContada}
+                      onChange={e => {
+                        const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+                        setAdjustCantContada(isNaN(val) ? 0 : val);
+                      }}
+                      className="w-16 h-8 text-center bg-white border border-indigo-300 rounded-lg font-mono text-base font-black text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setAdjustCantContada(prev => prev + 1)}
+                      className="w-8 h-8 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <span className="text-[10px] font-bold text-indigo-900">
+                    {adjustingItem.factor_empaque === 1 ? 'Unidades físicas' : 'Cajas físicas'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Resultado del Ajuste en Tiempo Real */}
+              {(() => {
+                const newDife = adjustCantContada - adjustingItem.cant_sistema;
+                const newDifPrecio = newDife * adjustingItem.factor_empaque * adjustingItem.precio_unitario;
+                return (
+                  <div className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs ${
+                    newDife === 0 
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                      : newDife < 0 
+                        ? 'bg-rose-50 border-rose-300 text-rose-900'
+                        : 'bg-blue-50 border-blue-300 text-blue-900'
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold">Diferencia Resultante:</span>
+                      <span className="font-mono font-black text-sm">
+                        {newDife > 0 ? `+${newDife}` : newDife} CJ
+                      </span>
+                      {adjustingItem.factor_empaque > 1 && newDife !== 0 && (
+                        <span className="text-[11px] font-mono opacity-80">
+                          ({newDife * adjustingItem.factor_empaque > 0 ? `+${newDife * adjustingItem.factor_empaque}` : newDife * adjustingItem.factor_empaque} UN)
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-mono font-black text-right">
+                      {newDifPrecio < 0 
+                        ? `- $${Math.abs(newDifPrecio).toLocaleString('es-CL')}` 
+                        : (newDifPrecio > 0 ? `+ $${newDifPrecio.toLocaleString('es-CL')}` : '$ 0 (Cuadrado)')}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Atajos Rápidos de Ajuste */}
+              <div>
+                <label className="text-[11px] font-black uppercase text-slate-400 block mb-1.5">
+                  Atajos de Ajuste Rápido:
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdjustCantContada(adjustingItem.cant_sistema);
+                      if (!adjustNotas) setAdjustNotas('Diferencia regularizada a 0 tras reconteo.');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#008744] border border-emerald-300 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>🎯 Cuadrar a 0 ({adjustingItem.cant_sistema} CJ)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const orig = adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada;
+                      setAdjustCantContada(orig);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>1er Conteo Operador</span>
+                  </button>
+
+                  {adjustingItem.conciliacion_999?.encontrado && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const stock999Cajas = Math.abs(adjustingItem.conciliacion_999!.total_cajas_equivalentes);
+                        setAdjustNotas(`Ajustado contra saldo Almacén 999 (${stock999Cajas} CJ).`);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                    >
+                      <span>⚠️ Compensar con 999 ({adjustingItem.conciliacion_999.total_cajas_equivalentes} CJ)</span>
+                    </button>
+                  )}
+
+                  {adjustingItem.conciliacion_sdif?.encontrado && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdjustNotas(`Ajustado contra saldo Almacén SDIF (${adjustingItem.conciliacion_sdif!.total_cajas_equivalentes} CJ).`);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-800 border border-purple-200 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                    >
+                      <span>📦 Compensar con SDIF ({adjustingItem.conciliacion_sdif.total_cajas_equivalentes} CJ)</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Motivo / Notas del Ajuste */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-black text-slate-700 block">
+                  Motivo / Justificación del Ajuste:
+                </label>
+                <div className="flex flex-wrap gap-1 mb-1.5">
+                  {[
+                    'Reconteo físico confirmado en rack',
+                    'Cajas encontradas en otra ubicación',
+                    'Diferencia de rotación/lote regularizada',
+                    'Autorizado por Supervisor'
+                  ].map(motivo => (
+                    <button
+                      key={motivo}
+                      type="button"
+                      onClick={() => setAdjustNotas(motivo)}
+                      className="px-2 py-0.5 rounded-md text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 font-medium transition-colors cursor-pointer"
+                    >
+                      {motivo}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={adjustNotas}
+                  onChange={e => setAdjustNotas(e.target.value)}
+                  rows={2}
+                  placeholder="Detalla aquí la justificación del ajuste (quién autorizó, motivo o condición física)..."
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-[#008744]"
+                />
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-3">
+              <div>
+                {supervisorRevisions[adjustingItem.sku] && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveItemAdjustment(adjustingItem.sku)}
+                    className="px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-xl transition-all cursor-pointer"
+                  >
+                    Revertir Ajuste
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAdjustingItem(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-xl transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveItemAdjustment}
+                  disabled={isSavingAdjustment}
+                  className="inline-flex items-center gap-1.5 px-5 py-2 bg-[#008744] hover:bg-[#007038] disabled:opacity-50 text-white text-xs font-black rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer"
+                >
+                  {isSavingAdjustment ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Guardando en la Nube...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Guardar Ajuste en la Nube</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
