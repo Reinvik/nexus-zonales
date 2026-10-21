@@ -626,14 +626,14 @@ export function consolidarInventario(
     });
   }
 
-  // Ordenar de Mayor Diferencia a Mayor Sobrante:
-  // Faltantes (< 0) -> Cuadrados (0) -> Sobrantes (> 0)
+  // Ordenar de menor diferencia de precio a mayor diferencia de precio:
+  // (De mayor faltante financiero negativo -$... pasando por $0 hasta mayor sobrante +$...)
   items.sort((a, b) => {
-    if (a.diferencia !== b.diferencia) {
-      return a.diferencia - b.diferencia;
-    }
     if (a.dif_precio !== b.dif_precio) {
       return a.dif_precio - b.dif_precio;
+    }
+    if (a.diferencia !== b.diferencia) {
+      return a.diferencia - b.diferencia;
     }
     return Number(a.sku) - Number(b.sku);
   });

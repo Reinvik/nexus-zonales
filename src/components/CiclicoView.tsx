@@ -36,7 +36,10 @@ import {
   Plus,
   Calendar,
   Cloud,
-  Database
+  Database,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CiclicoItem, SyncMeta, UsuarioCuenta, Product } from '../types';
@@ -249,9 +252,26 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     };
   }, [rawCiclico, items, products, supervisorRevisions]);
 
-  // Filtrado de la lista del Cíclico Consolidado
+  // Estados de ordenamiento para la tabla del Cíclico Consolidado
+  type CiclicoSortKey = 'dif_precio' | 'diferencia' | 'cant_sistema' | 'cant_contada' | 'precio_unitario' | 'sku' | 'descripcion';
+  type CiclicoSortDirection = 'asc' | 'desc';
+
+  const [sortKey, setSortKey] = useState<CiclicoSortKey>('dif_precio');
+  const [sortDirection, setSortDirection] = useState<CiclicoSortDirection>('asc');
+
+  const handleSort = (key: CiclicoSortKey) => {
+    if (sortKey === key) {
+      setSortDirection(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDirection('asc');
+    }
+  };
+
+  // Filtrado y ordenamiento de la lista del Cíclico Consolidado
+  // Predeterminado: Menor diferencia de precio a mayor diferencia de precio (de faltante negativo a mayor sobrante)
   const filteredCiclicoItems = useMemo(() => {
-    return itemsConsolidados.filter(item => {
+    const list = itemsConsolidados.filter(item => {
       // Filtro por Estado
       if (ciclicoFilterEstado === 'FALTANTES' && item.diferencia >= 0) return false;
       if (ciclicoFilterEstado === 'SOBRANTES' && item.diferencia <= 0) return false;
@@ -271,7 +291,36 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
       return true;
     });
-  }, [itemsConsolidados, ciclicoFilterEstado, ciclicoSearch]);
+
+    return [...list].sort((a, b) => {
+      let comparison = 0;
+      if (sortKey === 'dif_precio') {
+        comparison = a.dif_precio - b.dif_precio;
+      } else if (sortKey === 'diferencia') {
+        comparison = a.diferencia - b.diferencia;
+      } else if (sortKey === 'cant_sistema') {
+        comparison = a.cant_sistema - b.cant_sistema;
+      } else if (sortKey === 'cant_contada') {
+        comparison = a.cant_contada - b.cant_contada;
+      } else if (sortKey === 'precio_unitario') {
+        comparison = a.precio_unitario - b.precio_unitario;
+      } else if (sortKey === 'sku') {
+        comparison = a.sku.localeCompare(b.sku, undefined, { numeric: true });
+      } else if (sortKey === 'descripcion') {
+        comparison = a.descripcion.localeCompare(b.descripcion);
+      }
+
+      // Desempate consistente
+      if (comparison === 0) {
+        comparison = a.dif_precio - b.dif_precio;
+      }
+      if (comparison === 0) {
+        comparison = Number(a.sku) - Number(b.sku);
+      }
+
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+  }, [itemsConsolidados, ciclicoFilterEstado, ciclicoSearch, sortKey, sortDirection]);
 
   // Filtrado de la tabla MB52 (SDIF o 999)
   const filteredExternalItems = useMemo(() => {
@@ -1244,23 +1293,161 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
               ))}
             </div>
 
+            {/* Sub-barra: Indicador de Orden y Conteo */}
+            <div className="bg-slate-50/70 border-t border-slate-100 px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+              <div className="flex items-center gap-1.5">
+                <span>Mostrando <strong className="text-slate-800">{filteredCiclicoItems.length}</strong> de <strong className="text-slate-800">{itemsConsolidados.length}</strong> SKUs</span>
+                {ciclicoSearch && <span className="text-slate-400">(filtrado por "{ciclicoSearch}")</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-slate-400">Orden actual:</span>
+                <span className="inline-flex items-center gap-1 font-extrabold text-emerald-800 bg-emerald-100/70 border border-emerald-200/80 px-2 py-0.5 rounded-md text-[10px]">
+                  {sortKey === 'dif_precio' ? (
+                    sortDirection === 'asc' ? 'Menor a Mayor Dif. Precio ($)' : 'Mayor a Menor Dif. Precio ($)'
+                  ) : sortKey === 'diferencia' ? (
+                    sortDirection === 'asc' ? 'Menor a Mayor Diferencia (CJ)' : 'Mayor a Menor Diferencia (CJ)'
+                  ) : sortKey === 'precio_unitario' ? (
+                    sortDirection === 'asc' ? 'Menor a Mayor Precio' : 'Mayor a Menor Precio'
+                  ) : sortKey === 'cant_contada' ? (
+                    sortDirection === 'asc' ? 'Menor a Mayor Contado' : 'Mayor a Menor Contado'
+                  ) : sortKey === 'cant_sistema' ? (
+                    sortDirection === 'asc' ? 'Menor a Mayor Sistema' : 'Mayor a Menor Sistema'
+                  ) : sortKey === 'sku' ? (
+                    sortDirection === 'asc' ? 'SKU (Ascendente)' : 'SKU (Descendente)'
+                  ) : (
+                    'Descripción'
+                  )}
+                </span>
+                {(sortKey !== 'dif_precio' || sortDirection !== 'asc') && (
+                  <button
+                    type="button"
+                    onClick={() => { setSortKey('dif_precio'); setSortDirection('asc'); }}
+                    className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                  >
+                    Restablecer orden predeterminado
+                  </button>
+                )}
+              </div>
+            </div>
+
           </div>
 
           {/* TABLA DE SKUS CONSOLIDADOS DEL CÍCLICO */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
-                <thead className="bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
+                <thead className="bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200 select-none">
                   <tr>
                     <th className="p-3 w-8"></th>
-                    <th className="p-3">Material (SKU)</th>
-                    <th className="p-3">Descripción</th>
+                    <th 
+                      onClick={() => handleSort('sku')} 
+                      className="p-3 cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por SKU"
+                    >
+                      <div className="flex items-center gap-1">
+                        <span>Material (SKU)</span>
+                        {sortKey === 'sku' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => handleSort('descripcion')} 
+                      className="p-3 cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por Descripción"
+                    >
+                      <div className="flex items-center gap-1">
+                        <span>Descripción</span>
+                        {sortKey === 'descripcion' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
                     <th className="p-3 text-center">Ubic.</th>
-                    <th className="p-3 text-right">Cant. Sist (CJ)</th>
-                    <th className="p-3 text-right">Contado (CJ)</th>
-                    <th className="p-3 text-right">Diferencia</th>
-                    <th className="p-3 text-right">Precio ($)</th>
-                    <th className="p-3 text-right">Dif. Precio ($)</th>
+                    <th 
+                      onClick={() => handleSort('cant_sistema')} 
+                      className="p-3 text-right cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por Cantidad Sistema"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Cant. Sist (CJ)</span>
+                        {sortKey === 'cant_sistema' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => handleSort('cant_contada')} 
+                      className="p-3 text-right cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por Cantidad Contada"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Contado (CJ)</span>
+                        {sortKey === 'cant_contada' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => handleSort('diferencia')} 
+                      className="p-3 text-right cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por Diferencia de Cajas"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Diferencia</span>
+                        {sortKey === 'diferencia' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => handleSort('precio_unitario')} 
+                      className="p-3 text-right cursor-pointer hover:text-slate-900 transition-colors"
+                      title="Ordenar por Precio Unitario"
+                    >
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Precio ($)</span>
+                        {sortKey === 'precio_unitario' ? (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3 h-3 text-emerald-600" /> : <ArrowDown className="w-3 h-3 text-emerald-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-50" />
+                        )}
+                      </div>
+                    </th>
+                    <th 
+                      onClick={() => handleSort('dif_precio')} 
+                      className={`p-3 text-right cursor-pointer transition-colors ${
+                        sortKey === 'dif_precio' ? 'bg-emerald-100/70 text-emerald-950 font-black' : 'hover:text-slate-900'
+                      }`}
+                      title="Ordenar de menor diferencia de precio a mayor diferencia de precio"
+                    >
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span>Dif. Precio ($)</span>
+                        {sortKey === 'dif_precio' ? (
+                          sortDirection === 'asc' ? (
+                            <span className="inline-flex items-center gap-0.5 text-emerald-800 font-black bg-emerald-200/60 px-1.5 py-0.5 rounded text-[9px]">
+                              <ArrowUp className="w-3 h-3" /> Menor a Mayor
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-0.5 text-emerald-800 font-black bg-emerald-200/60 px-1.5 py-0.5 rounded text-[9px]">
+                              <ArrowDown className="w-3 h-3" /> Mayor a Menor
+                            </span>
+                          )
+                        ) : (
+                          <ArrowUpDown className="w-3 h-3 text-slate-300 opacity-60" />
+                        )}
+                      </div>
+                    </th>
                     <th className="p-3 text-center">Estado</th>
                     <th className="p-3">Conciliación CD / Zonales</th>
                     <th className="p-3 text-center">Ajustar</th>
