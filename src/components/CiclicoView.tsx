@@ -1187,7 +1187,11 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                               <div className="font-bold text-slate-800 truncate" title={item.descripcion}>
                                 {item.descripcion}
                               </div>
-                              <span className="text-[10px] text-slate-400">Factor: {item.factor_empaque} UN/CJ</span>
+                              {item.factor_empaque === 1 ? (
+                                <span className="text-[10px] text-slate-400 font-medium">Unidad: UN (Sin caja)</span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400">Factor: {item.factor_empaque} UN/CJ</span>
+                              )}
                             </td>
 
                             {/* Ubicación */}
@@ -1197,17 +1201,17 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
                             {/* Cant Sistema */}
                             <td className="p-3 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
-                              {item.cant_sistema}
+                              {item.cant_sistema} {item.factor_empaque === 1 ? 'UN' : 'CJ'}
                             </td>
 
                             {/* Cant Contada */}
                             <td className="p-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
                               <div className="flex flex-col items-end">
-                                <span>{item.cant_contada}</span>
+                                <span>{item.cant_contada} {item.factor_empaque === 1 ? 'UN' : 'CJ'}</span>
                                 {item.revisado_supervisor && (
                                   <span 
                                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-100 text-amber-900 border border-amber-300 mt-0.5"
-                                    title={`Reconteo en Terreno por ${item.revision_supervisor?.supervisor_nombre || 'Supervisor'}. Conteo original: ${item.revision_supervisor?.cant_contada_original} CJ.`}
+                                    title={`Reconteo en Terreno por ${item.revision_supervisor?.supervisor_nombre || 'Supervisor'}. Conteo original: ${item.revision_supervisor?.cant_contada_original} ${item.factor_empaque === 1 ? 'UN' : 'CJ'}.`}
                                   >
                                     <ClipboardCheck className="w-2.5 h-2.5 text-amber-700" />
                                     <span>Sup. ({item.revision_supervisor?.cant_contada_original} ➔ {item.cant_contada})</span>
@@ -1221,9 +1225,9 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                               <span className={`font-mono font-black ${
                                 item.diferencia < 0 ? 'text-rose-600' : (item.diferencia > 0 ? 'text-blue-600' : 'text-slate-500')
                               }`}>
-                                {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia} CJ
+                                {item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia} {item.factor_empaque === 1 ? 'UN' : 'CJ'}
                               </span>
-                              {item.diferencia !== 0 && (
+                              {item.diferencia !== 0 && item.factor_empaque > 1 && (
                                 <span className="block text-[10px] text-slate-400 font-mono">
                                   {item.diferencia_unidades > 0 ? `+${item.diferencia_unidades}` : item.diferencia_unidades} UN
                                 </span>
@@ -1267,13 +1271,13 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                                 {item.conciliacion_999?.es_conciliado && (
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-indigo-100 text-indigo-900 border border-indigo-200">
                                     <span>⚠️ Cruce 999:</span>
-                                    <span>+{item.conciliacion_999.cajas_conciliadas} CJ (${item.conciliacion_999.valor_conciliado.toLocaleString('es-CL')})</span>
+                                    <span>+{item.conciliacion_999.cajas_conciliadas} {item.factor_empaque === 1 ? 'UN' : 'CJ'} (${item.conciliacion_999.valor_conciliado.toLocaleString('es-CL')})</span>
                                   </span>
                                 )}
                                 {item.conciliacion_sdif?.es_conciliado && (
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-purple-100 text-purple-900 border border-purple-200">
                                     <span>📦 Cruce SDIF:</span>
-                                    <span>+{item.conciliacion_sdif.cajas_conciliadas} CJ (${item.conciliacion_sdif.valor_conciliado.toLocaleString('es-CL')})</span>
+                                    <span>+{item.conciliacion_sdif.cajas_conciliadas} {item.factor_empaque === 1 ? 'UN' : 'CJ'} (${item.conciliacion_sdif.valor_conciliado.toLocaleString('es-CL')})</span>
                                   </span>
                                 )}
                                 {!item.conciliacion_999?.es_conciliado && !item.conciliacion_sdif?.es_conciliado && (

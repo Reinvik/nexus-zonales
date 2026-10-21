@@ -494,7 +494,8 @@ export function consolidarInventario(
           esConciliado = true;
           countConciliados999++;
           sumMontoConciliado999 += valorConciliado999;
-          accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) del stock positivo en 999. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
+          const unidadTexto = factorEmpaque === 1 ? 'UN' : 'CJ';
+          accion = `Conciliado con 999: ${cajasConciliadas999} ${unidadTexto} (${unidadesConciliadas} UN) del stock positivo en 999. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
         } else {
           accion = `Stock en 999 (${totalStock999} UN) insuficiente para completar 1 CJ entera (${factorEmpaque} UN/CJ).`;
         }
@@ -556,7 +557,8 @@ export function consolidarInventario(
           esConciliadoSdif = true;
           countConciliadosSdif++;
           sumMontoConciliadoSdif += valorConciliadoSdif;
-          accion = `Conciliado con SDIF: ${cajasConciliadasSdif} CJ (${unidadesConciliadasSdif} UN) de saldo zonal tras cruce 999. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
+          const unidadTexto = factorEmpaque === 1 ? 'UN' : 'CJ';
+          accion = `Conciliado con SDIF: ${cajasConciliadasSdif} ${unidadTexto} (${unidadesConciliadasSdif} UN) de saldo zonal tras cruce 999. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
           if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
         } else {
           accion = `Saldo SDIF insuficiente para completar 1 CJ entera (${factorEmpaque} UN/CJ).`;
