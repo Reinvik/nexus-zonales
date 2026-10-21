@@ -9,6 +9,7 @@ import {
   SupervisorRevision
 } from '../types/ciclico';
 import { Product } from '../types';
+import { FACTORES_EMPAQUE } from '../data/factoresEmpaque';
 
 /**
  * Parsea un número en formato chileno / SAP (ej: "40,000", "1.258.750", "-475.000", "4.924,000")
@@ -101,7 +102,16 @@ export function inferZonalFromLote(lote: string): string {
 /**
  * Extrae el factor de empaque (unidades por caja) desde la descripción del material o del catálogo
  */
+/**
+ * Factores de empaque (UN por CJ). El maestro (src/data/factoresEmpaque.ts) tiene prioridad
+ * sobre la inferencia por texto de la descripción. Los overrides manuales pisan al maestro.
+ */
+export const FACTOR_EMPAQUE_OVERRIDES: Record<string, number> = {};
+
 export function extractPackagingFactor(desc: string, _sku?: string, _productsMap?: Map<string, Product>): number {
+  const skuKey = _sku ? String(_sku).trim().replace(/^0+/, '') : '';
+  const overrideFactor = skuKey ? (FACTOR_EMPAQUE_OVERRIDES[skuKey] ?? FACTORES_EMPAQUE[skuKey]) : undefined;
+  if (overrideFactor) return overrideFactor;
   if (!desc) return 1;
 
   // Evitar confundir calibres con unidades (ej. "calibre 7x7")
@@ -281,6 +291,8 @@ export function parseSdifRawText(text: string): any[] {
 /**
  * Consolidación completa de Inventario Cíclico + Cruce 999 + Cruce SDIF
  */
+const normSku = (s: any): string => String(s ?? '').trim().replace(/^0+/, '');
+
 export function consolidarInventario(
   ciclicoRawRows: any[],
   almacen999Rows: any[],
@@ -333,15 +345,17 @@ export function consolidarInventario(
   // 2. Indexar datos de Almacén 999 por SKU
   const map999 = new Map<string, any[]>();
   for (const r of almacen999Rows) {
-    if (!map999.has(r.sku)) map999.set(r.sku, []);
-    map999.get(r.sku)!.push(r);
+    const k = normSku(r.sku);
+    if (!map999.has(k)) map999.set(k, []);
+    map999.get(k)!.push({ ...r, stock_disponible: Number(r.stock_disponible) || 0 });
   }
 
   // 3. Indexar datos de SDIF por SKU
   const mapSdif = new Map<string, any[]>();
   for (const r of sdifRows) {
-    if (!mapSdif.has(r.sku)) mapSdif.set(r.sku, []);
-    mapSdif.get(r.sku)!.push(r);
+    const k = normSku(r.sku);
+    if (!mapSdif.has(k)) mapSdif.set(k, []);
+    mapSdif.get(k)!.push({ ...r, libre_util: Number(r.libre_util) || 0, valor: Number(r.valor) || 0 });
   }
 
   const items: InventarioItemConsolidado[] = [];
@@ -458,8 +472,8 @@ export function consolidarInventario(
     // y se puede conciliar hasta la cantidad del sobrante.
     let conciliacion999: Conciliacion999Info | undefined;
     let cajasConciliadas999 = 0;
-    const items999 = map999.get(sku);
-    if (items999 && items999.length > 0) {
+    const items999 = (map999.get(normSku(sku)) || []).filter(it => it.stock_disponible > 0); // Los negativos son errores: se ignoran
+    if (items999.length > 0) {
       const totalStock999 = items999.reduce((acc, curr) => acc + curr.stock_disponible, 0);
       const totalCajas999 = factorEmpaque > 0 ? Number((totalStock999 / factorEmpaque).toFixed(2)) : totalStock999;
       
@@ -469,18 +483,16 @@ export function consolidarInventario(
       let valorConciliado999 = 0;
       let accion = '';
 
-      if (haySobrante && totalStock999 < 0) {
-        // En 999 hay faltante (negativo) y en cíclico sobrante. Se concilia HASTA el monto del sobrante
-        const stockNegativoCajas = Math.abs(totalCajas999);
-        cajasConciliadas999 = Math.min(difeFinal, stockNegativoCajas);
+      if (haySobrante && totalStock999 > 0) {
+        // PRIORIDAD 999: solo stock positivo. Se concilia HASTA el monto del sobrante.
+        // Lo que quede por conciliar pasa a SDIF.
+        cajasConciliadas999 = Math.min(difeFinal, totalCajas999);
         unidadesConciliadas = cajasConciliadas999 * factorEmpaque;
         valorConciliado999 = Math.round(cajasConciliadas999 * factorEmpaque * precio);
         esConciliado = true;
         countConciliados999++;
         sumMontoConciliado999 += valorConciliado999;
-        accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) regularizan faltante en SCHROTT. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
-      } else if (haySobrante && totalStock999 > 0) {
-        accion = `Sobrante en cíclico (+${difeFinal} CJ). Existe stock positivo en 999: ${totalCajas999} CJ (${totalStock999} UN).`;
+        accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) del stock positivo en 999. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
       } else if (difeFinal <= 0) {
         accion = `Sin sobrante en cíclico. Existencia en 999: ${totalCajas999} CJ (${totalStock999} UN). No aplica conciliación.`;
       } else {
@@ -513,7 +525,7 @@ export function consolidarInventario(
     // Conciliación con Almacén SDIF (Diferencias Zonales)
     // REGLA CIAL CASCADA: Se concilia con el SOBRANTE REMANENTE tras haber conciliado primero con 999
     let conciliacionSdif: ConciliacionSdifInfo | undefined;
-    const itemsSdif = mapSdif.get(sku);
+    const itemsSdif = mapSdif.get(normSku(sku));
     if (itemsSdif && itemsSdif.length > 0) {
       const totalLibreUtil = itemsSdif.reduce((acc, curr) => acc + curr.libre_util, 0);
       const totalCajasSdif = factorEmpaque > 0 ? Number((totalLibreUtil / factorEmpaque).toFixed(2)) : totalLibreUtil;

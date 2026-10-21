@@ -52,6 +52,7 @@ import { getTodayChile, formatChileanDate } from '../utils/date';
 import { 
   parseCiclicoRawText, 
   consolidarInventario, 
+  extractPackagingFactor, 
   exportarCiclicoAExcel 
 } from '../utils/ciclicoParser';
 import {
@@ -1502,7 +1503,18 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                           {item.zonal}
                         </td>
                         <td className="p-3 text-right font-black text-slate-900 whitespace-nowrap">
-                          {item.cantidad}
+                          {(() => {
+                            const factor = extractPackagingFactor(item.texto_breve || '', item.material) || 1;
+                            const esUN = (item.umb || 'UN').toUpperCase() !== 'CJ';
+                            const un = esUN ? item.cantidad : item.cantidad * factor;
+                            const cj = esUN ? item.cantidad / factor : item.cantidad;
+                            return (
+                              <div className="flex flex-col items-end leading-tight">
+                                <span>{Number(cj.toFixed(2)).toLocaleString('es-CL')} CJ</span>
+                                <span className="text-[10px] font-semibold text-slate-400">{Number(un.toFixed(2)).toLocaleString('es-CL')} UN</span>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="p-3 text-center font-bold text-slate-500">
                           {item.umb}
