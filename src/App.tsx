@@ -8,6 +8,12 @@ import { CiclicoView } from './components/CiclicoView';
 import { UserManagementView } from './components/UserManagementView';
 import { LoginModal } from './components/LoginModal';
 import { CiclicoItem, Desviacion, EstadoNC, Product, StagedItem, SyncMeta, UsuarioCuenta } from './types';
+import { 
+  InventarioCiclicoAuditoria, 
+  CiclicoMetadata, 
+  CiclicoTotales, 
+  InventarioItemConsolidado 
+} from './types/ciclico';
 import { supabase } from './lib/supabase';
 import { getISOWeekNumber, getTodayChile } from './utils/date';
 import initialProductsData from './data/products.json';
@@ -67,6 +73,13 @@ export default function App() {
   });
 
   const [isSyncingCiclico, setIsSyncingCiclico] = useState(false);
+
+  // Historial Diario de Cíclicos Persistidos (Sincronizado entre todos los PCs)
+  const [ciclicoHistorial, setCiclicoHistorial] = useState<InventarioCiclicoAuditoria[]>(() => {
+    const cached = localStorage.getItem('nexus_zonales_ciclico_historial_cache');
+    return cached ? JSON.parse(cached) : [];
+  });
+  const [isLoadingCiclicoHistorial, setIsLoadingCiclicoHistorial] = useState(false);
 
   // Registro de Desviaciones
   const [deviations, setDeviations] = useState<Desviacion[]>([]);
@@ -162,12 +175,23 @@ export default function App() {
         localStorage.setItem('nexus_zonales_sync_meta_cache', JSON.stringify(metaData));
       }
 
-      const { data, error } = await supabase
-        .from('zonales_inventario_ciclico')
-        .select('*')
-        .order('id');
+      // Paginar: Supabase limita a 1000 filas por consulta
+      const pageSize = 1000;
+      const data: any[] = [];
+      let error: any = null;
+      for (let from = 0; ; from += pageSize) {
+        const { data: page, error: pageError } = await supabase
+          .from('zonales_inventario_ciclico')
+          .select('*')
+          .order('id')
+          .range(from, from + pageSize - 1);
+        if (pageError) { error = pageError; break; }
+        if (!page || page.length === 0) break;
+        data.push(...page);
+        if (page.length < pageSize) break;
+      }
 
-      if (!error && data && data.length > 0) {
+      if (!error && data.length > 0) {
         setCiclicoItems(data as CiclicoItem[]);
         localStorage.setItem('nexus_zonales_ciclico_cache', JSON.stringify(data));
       }
@@ -176,12 +200,118 @@ export default function App() {
     }
   }, []);
 
+  // Cargar Historial Diario de Cíclicos Persistidos
+  const fetchCiclicoHistorial = useCallback(async () => {
+    setIsLoadingCiclicoHistorial(true);
+    try {
+      const { data, error } = await supabase
+        .from('zonales_inventario_ciclico_historial')
+        .select('*')
+        .order('fecha', { ascending: false });
+
+      if (!error && data) {
+        setCiclicoHistorial(data as InventarioCiclicoAuditoria[]);
+        localStorage.setItem('nexus_zonales_ciclico_historial_cache', JSON.stringify(data));
+      }
+    } catch (err) {
+      console.warn('Network error fetching ciclico historial from Supabase:', err);
+    } finally {
+      setIsLoadingCiclicoHistorial(false);
+    }
+  }, []);
+
+  // Guardar Cíclico Oficial del Día en la Nube
+  const handleSaveCiclicoDelDia = async (payload: {
+    fecha: string;
+    rawText: string;
+    metadata: CiclicoMetadata;
+    totales: CiclicoTotales;
+    itemsConsolidados: InventarioItemConsolidado[];
+  }): Promise<boolean> => {
+    try {
+      const record = {
+        fecha: payload.fecha,
+        hora: payload.metadata.hora_reporte || new Date().toLocaleTimeString('es-CL'),
+        usuario: currentUser.username || payload.metadata.usuario || 'AMELLA',
+        almacen: payload.metadata.almacen || 'NCD',
+        tipo_almacen: payload.metadata.tip_alm || 'PCG',
+        total_lineas: payload.itemsConsolidados.length,
+        total_sistema: payload.totales.total_sistema,
+        total_contado: payload.totales.total_contado,
+        diferencia_neta: payload.totales.diferencia_neta,
+        dif_precio_total: payload.totales.dif_precio_total,
+        items_con_diferencia: payload.totales.total_faltantes + payload.totales.total_sobrantes,
+        sobrantes_conciliados_999: payload.totales.sobrantes_conciliados_999,
+        sobrantes_conciliados_sdif: payload.totales.sobrantes_conciliados_sdif,
+        raw_ciclico: payload.rawText,
+        resumen_json: {
+          total_skus: payload.totales.total_skus,
+          total_faltantes_sku: payload.totales.total_faltantes,
+          total_sobrantes_sku: payload.totales.total_sobrantes,
+          total_descuadre_lotes: payload.totales.total_descuadre_lotes,
+          total_cuadrados: payload.totales.total_cuadrados,
+          monto_negativo: payload.totales.monto_negativo,
+          monto_positivo: payload.totales.monto_positivo,
+          monto_total_bruto: payload.totales.monto_total_bruto,
+          monto_total_conciliado: payload.totales.monto_total_conciliado,
+          monto_final_descuadre: payload.totales.monto_final_descuadre,
+          guardado_por: currentUser.nombre,
+          fecha_guardado: new Date().toISOString()
+        },
+        detalles_json: payload.itemsConsolidados.map(item => ({
+          sku: item.sku,
+          descripcion: item.descripcion,
+          cant_sistema: item.cant_sistema,
+          cant_contada: item.cant_contada,
+          diferencia: item.diferencia,
+          dif_precio: item.dif_precio,
+          estado: item.estado,
+          lotes: item.lotes_desglose
+        }))
+      };
+
+      const { error } = await supabase
+        .from('zonales_inventario_ciclico_historial')
+        .upsert([record], { onConflict: 'fecha' });
+
+      if (error) {
+        console.error('Error guardando ciclico del dia en Supabase:', error);
+        return false;
+      }
+
+      await fetchCiclicoHistorial();
+      return true;
+    } catch (err) {
+      console.error('Error general guardando ciclico del dia:', err);
+      return false;
+    }
+  };
+
   useEffect(() => {
     fetchUsers();
     fetchDeviations();
     fetchProducts();
     fetchCiclico();
-  }, [fetchUsers, fetchDeviations, fetchProducts, fetchCiclico]);
+    fetchCiclicoHistorial();
+
+    // Suscripción Realtime para reflejar cambios automáticamente entre múltiples computadores
+    const channel = supabase
+      .channel('zonales_realtime_channel')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zonales_inventario_ciclico_historial' }, () => {
+        fetchCiclicoHistorial();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zonales_inventario_ciclico' }, () => {
+        fetchCiclico();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'zonales_desviaciones' }, () => {
+        fetchDeviations();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchUsers, fetchDeviations, fetchProducts, fetchCiclico, fetchCiclicoHistorial]);
 
   // Cambiar Cuenta Activa
   const handleSelectUser = (user: UsuarioCuenta) => {
@@ -435,6 +565,14 @@ export default function App() {
         .upsert([updatedMeta], { onConflict: 'modulo' });
 
       // Guardar batch en Supabase en bloques de 100
+      // Reemplazar snapshot de los almacenes cargados para evitar duplicados
+      const almacenes = Array.from(new Set(newItems.map(i => i.almacen)));
+      const { error: delError } = await supabase
+        .from('zonales_inventario_ciclico')
+        .delete()
+        .in('almacen', almacenes);
+      if (delError) throw delError;
+
       const batchSize = 100;
       for (let i = 0; i < newItems.length; i += batchSize) {
         const batch = newItems.slice(i, i + batchSize).map(item => ({
@@ -450,9 +588,10 @@ export default function App() {
           estado: item.estado || 'Pendiente'
         }));
 
-        await supabase
+        const { error: insError } = await supabase
           .from('zonales_inventario_ciclico')
           .insert(batch);
+        if (insError) throw insError;
       }
 
       return true;
@@ -521,6 +660,10 @@ export default function App() {
             isSyncing={isSyncingCiclico}
             currentUser={currentUser}
             products={products}
+            ciclicoHistorial={ciclicoHistorial}
+            isLoadingHistorial={isLoadingCiclicoHistorial}
+            onSaveCiclicoDelDia={handleSaveCiclicoDelDia}
+            onRefreshCiclicoHistorial={fetchCiclicoHistorial}
           />
         )}
 

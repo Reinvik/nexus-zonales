@@ -5,7 +5,8 @@ import {
   EstadoDiferencia, 
   Conciliacion999Info, 
   ConciliacionSdifInfo,
-  CiclicoTotales 
+  CiclicoTotales,
+  SupervisorRevision
 } from '../types/ciclico';
 import { Product } from '../types';
 
@@ -284,7 +285,8 @@ export function consolidarInventario(
   ciclicoRawRows: any[],
   almacen999Rows: any[],
   sdifRows: any[],
-  productsList: Product[] = []
+  productsList: Product[] = [],
+  supervisorOverrides?: Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string }>
 ): {
   items: InventarioItemConsolidado[];
   totales: {
@@ -409,16 +411,32 @@ export function consolidarInventario(
       };
     });
 
+    // Si existe reconteo del supervisor para este SKU, se aplica como conteo efectivo
+    const revSupervisor = supervisorOverrides?.[sku];
+    let cantContadaFinal = totalContadoSku;
+    let difeFinal = totalDifeSku;
+    let difeUnidadesFinal = totalDifeSku * factorEmpaque;
+    let difPrecioFinal = totalDifPrecioSku;
+    let revisadoSupervisor = false;
+
+    if (revSupervisor !== undefined) {
+      cantContadaFinal = revSupervisor.cant_contada;
+      difeFinal = cantContadaFinal - totalSistemaSku;
+      difeUnidadesFinal = difeFinal * factorEmpaque;
+      difPrecioFinal = difeUnidadesFinal * precio;
+      revisadoSupervisor = true;
+    }
+
     // Determinar Estado (En Picking el lote no importa: si la diferencia total es 0, el SKU está cuadrado)
     let estado: EstadoDiferencia = 'cuadrado';
-    if (totalDifeSku < 0) {
+    if (difeFinal < 0) {
       estado = 'faltante';
       countFaltantes++;
-      sumMontoNegativo += totalDifPrecioSku;
-    } else if (totalDifeSku > 0) {
+      sumMontoNegativo += difPrecioFinal;
+    } else if (difeFinal > 0) {
       estado = 'sobrante';
       countSobrantes++;
-      sumMontoPositivo += totalDifPrecioSku;
+      sumMontoPositivo += difPrecioFinal;
     } else {
       estado = 'cuadrado';
       countCuadrados++;
@@ -428,26 +446,25 @@ export function consolidarInventario(
     }
 
     sumSistema += totalSistemaSku;
-    sumContado += totalContadoSku;
-    sumDiferencia += totalDifeSku;
-    sumDifPrecio += totalDifPrecioSku;
+    sumContado += cantContadaFinal;
+    sumDiferencia += difeFinal;
+    sumDifPrecio += difPrecioFinal;
 
-    // Diferencia en unidades y kilos
-    const difeUnidades = totalDifeSku * factorEmpaque;
-    const kilosEquivalentes = pesoNetoUnit > 0 ? Number((difeUnidades * pesoNetoUnit).toFixed(2)) : 0;
+    // Kilos equivalentes
+    const kilosEquivalentes = pesoNetoUnit > 0 ? Number((difeUnidadesFinal * pesoNetoUnit).toFixed(2)) : 0;
 
     // Conciliación con Almacén 999 (Diferencias CD)
     // REGLA CIAL: La conciliación solo existe si hay sobrante en el cíclico (diferencia > 0)
     // y se puede conciliar hasta la cantidad del sobrante.
     let conciliacion999: Conciliacion999Info | undefined;
+    let cajasConciliadas999 = 0;
     const items999 = map999.get(sku);
     if (items999 && items999.length > 0) {
       const totalStock999 = items999.reduce((acc, curr) => acc + curr.stock_disponible, 0);
       const totalCajas999 = factorEmpaque > 0 ? Number((totalStock999 / factorEmpaque).toFixed(2)) : totalStock999;
       
-      const haySobrante = totalDifeSku > 0;
+      const haySobrante = difeFinal > 0;
       let esConciliado = false;
-      let cajasConciliadas = 0;
       let unidadesConciliadas = 0;
       let valorConciliado999 = 0;
       let accion = '';
@@ -455,16 +472,16 @@ export function consolidarInventario(
       if (haySobrante && totalStock999 < 0) {
         // En 999 hay faltante (negativo) y en cíclico sobrante. Se concilia HASTA el monto del sobrante
         const stockNegativoCajas = Math.abs(totalCajas999);
-        cajasConciliadas = Math.min(totalDifeSku, stockNegativoCajas);
-        unidadesConciliadas = cajasConciliadas * factorEmpaque;
-        valorConciliado999 = Math.round(cajasConciliadas * factorEmpaque * precio);
+        cajasConciliadas999 = Math.min(difeFinal, stockNegativoCajas);
+        unidadesConciliadas = cajasConciliadas999 * factorEmpaque;
+        valorConciliado999 = Math.round(cajasConciliadas999 * factorEmpaque * precio);
         esConciliado = true;
         countConciliados999++;
         sumMontoConciliado999 += valorConciliado999;
-        accion = `Conciliado con 999: ${cajasConciliadas} CJ (${unidadesConciliadas} UN) regularizan faltante en SCHROTT. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
+        accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) regularizan faltante en SCHROTT. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
       } else if (haySobrante && totalStock999 > 0) {
-        accion = `Sobrante en cíclico (+${totalDifeSku} CJ). Existe stock positivo en 999: ${totalCajas999} CJ (${totalStock999} UN).`;
-      } else if (totalDifeSku <= 0) {
+        accion = `Sobrante en cíclico (+${difeFinal} CJ). Existe stock positivo en 999: ${totalCajas999} CJ (${totalStock999} UN).`;
+      } else if (difeFinal <= 0) {
         accion = `Sin sobrante en cíclico. Existencia en 999: ${totalCajas999} CJ (${totalStock999} UN). No aplica conciliación.`;
       } else {
         accion = `Registrado en 999 con stock 0.`;
@@ -473,7 +490,7 @@ export function consolidarInventario(
       conciliacion999 = {
         encontrado: true,
         es_conciliado: esConciliado,
-        cajas_conciliadas: cajasConciliadas,
+        cajas_conciliadas: cajasConciliadas999,
         unidades_conciliadas: unidadesConciliadas,
         total_stock_disponible: totalStock999,
         total_cajas_equivalentes: totalCajas999,
@@ -494,7 +511,7 @@ export function consolidarInventario(
     }
 
     // Conciliación con Almacén SDIF (Diferencias Zonales)
-    // REGLA CIAL: Solo se concilia si hay sobrante en el cíclico (diferencia > 0)
+    // REGLA CIAL CASCADA: Se concilia con el SOBRANTE REMANENTE tras haber conciliado primero con 999
     let conciliacionSdif: ConciliacionSdifInfo | undefined;
     const itemsSdif = mapSdif.get(sku);
     if (itemsSdif && itemsSdif.length > 0) {
@@ -503,33 +520,40 @@ export function consolidarInventario(
       const totalValorSdif = itemsSdif.reduce((acc, curr) => acc + curr.valor, 0);
       const zonalesList = Array.from(new Set(itemsSdif.map(i => i.zonal_estimada).filter(Boolean)));
 
-      const haySobrante = totalDifeSku > 0;
-      let esConciliado = false;
-      let cajasConciliadas = 0;
-      let unidadesConciliadas = 0;
+      // Sobrante remanente disponible tras conciliar con 999
+      const sobranteRemanenteParaSdif = Math.max(0, difeFinal - cajasConciliadas999);
+      const haySobranteParaSdif = sobranteRemanenteParaSdif > 0 && totalCajasSdif > 0;
+      let esConciliadoSdif = false;
+      let cajasConciliadasSdif = 0;
+      let unidadesConciliadasSdif = 0;
       let valorConciliadoSdif = 0;
       let accion = '';
 
-      if (haySobrante) {
-        // Concilia hasta la cantidad del sobrante
-        cajasConciliadas = Math.min(totalDifeSku, totalCajasSdif);
-        unidadesConciliadas = cajasConciliadas * factorEmpaque;
-        valorConciliadoSdif = Math.round(cajasConciliadas * factorEmpaque * precio);
-        esConciliado = true;
+      if (haySobranteParaSdif) {
+        // Concilia hasta la cantidad del sobrante remanente
+        cajasConciliadasSdif = Math.min(sobranteRemanenteParaSdif, totalCajasSdif);
+        unidadesConciliadasSdif = cajasConciliadasSdif * factorEmpaque;
+        valorConciliadoSdif = Math.round(cajasConciliadasSdif * factorEmpaque * precio);
+        esConciliadoSdif = true;
         countConciliadosSdif++;
         sumMontoConciliadoSdif += valorConciliadoSdif;
-        accion = `Conciliado con SDIF: ${cajasConciliadas} CJ (${unidadesConciliadas} UN) de saldo zonal. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
+        accion = `Conciliado con SDIF: ${cajasConciliadasSdif} CJ (${unidadesConciliadasSdif} UN) de saldo zonal tras cruce 999. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
         if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
-      } else {
+      } else if (difeFinal > 0 && cajasConciliadas999 >= difeFinal) {
+        accion = `Sobrante (+${difeFinal} CJ) compensado totalmente en Almacén 999. Registro informativo SDIF: ${totalCajasSdif} CJ (${totalLibreUtil} UN).`;
+        if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
+      } else if (difeFinal <= 0) {
         accion = `Sin sobrante en cíclico. Registro informativo SDIF: ${totalCajasSdif} CJ (${totalLibreUtil} UN) valorizado en $${totalValorSdif.toLocaleString('es-CL')}.`;
         if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
+      } else {
+        accion = `Registrado en SDIF con saldo 0.`;
       }
 
       conciliacionSdif = {
         encontrado: true,
-        es_conciliado: esConciliado,
-        cajas_conciliadas: cajasConciliadas,
-        unidades_conciliadas: unidadesConciliadas,
+        es_conciliado: esConciliadoSdif,
+        cajas_conciliadas: cajasConciliadasSdif,
+        unidades_conciliadas: unidadesConciliadasSdif,
         total_libre_util: totalLibreUtil,
         total_cajas_equivalentes: totalCajasSdif,
         total_valor: totalValorSdif,
@@ -554,18 +578,27 @@ export function consolidarInventario(
       tip_alm,
       docto,
       cant_sistema: totalSistemaSku,
-      cant_contada: totalContadoSku,
-      diferencia: totalDifeSku,
+      cant_contada: cantContadaFinal,
+      diferencia: difeFinal,
       um,
       factor_empaque: factorEmpaque,
-      diferencia_unidades: difeUnidades,
+      diferencia_unidades: difeUnidadesFinal,
       kilos_equivalentes: kilosEquivalentes,
       precio_unitario: precio,
-      dif_precio: totalDifPrecioSku,
+      dif_precio: difPrecioFinal,
       estado,
       lotes_desglose: lotesDesglose,
       conciliacion_999: conciliacion999,
-      conciliacion_sdif: conciliacionSdif
+      conciliacion_sdif: conciliacionSdif,
+      revisado_supervisor: revisadoSupervisor,
+      revision_supervisor: revisadoSupervisor ? {
+        cant_contada_original: totalContadoSku,
+        diferencia_original: totalDifeSku,
+        cant_contada_supervisor: cantContadaFinal,
+        diferencia_supervisor: difeFinal,
+        notas: revSupervisor?.notas,
+        supervisor_nombre: revSupervisor?.supervisor_nombre
+      } : undefined
     });
   }
 

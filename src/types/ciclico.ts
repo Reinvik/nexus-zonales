@@ -80,6 +80,16 @@ export type EstadoDiferencia =
   | 'descuadre_lotes' // dife == 0 pero con líneas positivas y negativas de lote
   | 'cuadrado';       // todo en 0
 
+export interface SupervisorRevision {
+  cant_contada_original: number;
+  diferencia_original: number;
+  cant_contada_supervisor: number;
+  diferencia_supervisor: number;
+  notas?: string;
+  fecha_revision?: string;
+  supervisor_nombre?: string;
+}
+
 export interface InventarioItemConsolidado {
   sku: string;
   descripcion: string;
@@ -100,6 +110,8 @@ export interface InventarioItemConsolidado {
   lotes_desglose: CiclicoLoteDetalle[];
   conciliacion_999?: Conciliacion999Info;
   conciliacion_sdif?: ConciliacionSdifInfo;
+  revisado_supervisor?: boolean;
+  revision_supervisor?: SupervisorRevision;
 }
 
 export interface CiclicoMetadata {
@@ -126,14 +138,8 @@ export interface InventarioCiclicoAuditoria {
   items_con_diferencia: number;
   sobrantes_conciliados_999: number;
   sobrantes_conciliados_sdif: number;
-  resumen_json?: {
-    total_skus: number;
-    total_faltantes_sku: number;
-    total_sobrantes_sku: number;
-    total_descuadre_lotes: number;
-    total_cuadrados: number;
-    metadata?: CiclicoMetadata;
-  };
-  detalles_json?: InventarioItemConsolidado[];
+  raw_ciclico?: string;
+  resumen_json?: any;
+  detalles_json?: any;
   created_at?: string;
 }

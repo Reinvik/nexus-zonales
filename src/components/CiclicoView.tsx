@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   Boxes, 
@@ -24,13 +24,31 @@ import {
   Check,
   RotateCcw,
   Sparkles,
-  Info
+  Info,
+  Tablet,
+  SlidersHorizontal,
+  Save,
+  Edit3,
+  ClipboardCheck,
+  Undo2,
+  MapPin,
+  Minus,
+  Plus,
+  Calendar,
+  Cloud,
+  Database
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { CiclicoItem, SyncMeta, UsuarioCuenta, Product } from '../types';
-import { InventarioItemConsolidado, CiclicoMetadata, CiclicoTotales } from '../types/ciclico';
+import { 
+  InventarioItemConsolidado, 
+  CiclicoMetadata, 
+  CiclicoTotales,
+  InventarioCiclicoAuditoria
+} from '../types/ciclico';
 import { CIAL_ZONALES } from '../data/zonales';
 import { SAMPLE_CICLICO_RAW } from '../data/sampleCiclicoData';
+import { getTodayChile, formatChileanDate } from '../utils/date';
 import { 
   parseCiclicoRawText, 
   consolidarInventario, 
@@ -49,6 +67,16 @@ interface CiclicoViewProps {
   isSyncing: boolean;
   currentUser?: UsuarioCuenta;
   products?: Product[];
+  ciclicoHistorial?: InventarioCiclicoAuditoria[];
+  isLoadingHistorial?: boolean;
+  onSaveCiclicoDelDia?: (payload: {
+    fecha: string;
+    rawText: string;
+    metadata: CiclicoMetadata;
+    totales: CiclicoTotales;
+    itemsConsolidados: InventarioItemConsolidado[];
+  }) => Promise<boolean>;
+  onRefreshCiclicoHistorial?: () => Promise<void>;
 }
 
 export const CiclicoView: React.FC<CiclicoViewProps> = ({
@@ -57,15 +85,72 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   onSyncCiclico,
   isSyncing,
   currentUser,
-  products = []
+  products = [],
+  ciclicoHistorial = [],
+  isLoadingHistorial = false,
+  onSaveCiclicoDelDia,
+  onRefreshCiclicoHistorial
 }) => {
   // 1. Navegación entre Sub-Pestañas: Resultado Cíclico vs MB52 Externos
   const [activeSubTab, setActiveSubTab] = useState<'resultado' | 'sdif' | '999'>('resultado');
 
-  // 2. Estado del Cíclico Raw (persistido en localStorage)
+  // 2. Control de Fecha y Persistencia Diaria (Sincronizado con Supabase)
+  const [selectedFecha, setSelectedFecha] = useState<string>(() => {
+    return getTodayChile();
+  });
+  const [modalFecha, setModalFecha] = useState<string>(() => getTodayChile());
+  const [isSavingDailyCiclico, setIsSavingDailyCiclico] = useState<boolean>(false);
+
+  // Estado del Cíclico Raw (persistido en memoria y sincronizado en la nube)
   const [rawCiclico, setRawCiclico] = useState<string>(() => {
     return localStorage.getItem('nexus_zonales_raw_ciclico') || SAMPLE_CICLICO_RAW;
   });
+
+  // Sincronizar automáticamente el cíclico activo cuando el historial cambia en Supabase
+  useEffect(() => {
+    if (ciclicoHistorial && ciclicoHistorial.length > 0) {
+      // 1. Buscar si existe registro guardado para la fecha seleccionada
+      const foundCurrent = ciclicoHistorial.find(h => {
+        const clean = h.fecha ? h.fecha.split('T')[0] : '';
+        return clean === selectedFecha;
+      });
+
+      if (foundCurrent && foundCurrent.raw_ciclico) {
+        setRawCiclico(foundCurrent.raw_ciclico);
+        return;
+      }
+
+      // 2. Si no hay registro con texto para selectedFecha pero hay otros guardados,
+      // seleccionar el más reciente con contenido
+      const latest = ciclicoHistorial.find(h => Boolean(h.raw_ciclico));
+      if (latest && latest.raw_ciclico) {
+        const cleanLatest = latest.fecha.split('T')[0];
+        setSelectedFecha(cleanLatest);
+        setRawCiclico(latest.raw_ciclico);
+      }
+    }
+  }, [ciclicoHistorial]);
+
+  // Cambiar día seleccionado
+  const handleSelectFecha = (fecha: string) => {
+    setSelectedFecha(fecha);
+    const item = ciclicoHistorial?.find(h => {
+      const clean = h.fecha ? h.fecha.split('T')[0] : '';
+      return clean === fecha;
+    });
+    if (item && item.raw_ciclico) {
+      setRawCiclico(item.raw_ciclico);
+      localStorage.setItem('nexus_zonales_raw_ciclico', item.raw_ciclico);
+    }
+  };
+
+  // Ítem activo del historial para mostrar metadatos (quién guardó, hora)
+  const activeHistorialItem = useMemo(() => {
+    return ciclicoHistorial?.find(h => {
+      const clean = h.fecha ? h.fecha.split('T')[0] : '';
+      return clean === selectedFecha;
+    });
+  }, [ciclicoHistorial, selectedFecha]);
 
   // Modal para Cargar / Pegar Monitor de Inventario Cíclico (SAP)
   const [showCiclicoModal, setShowCiclicoModal] = useState<boolean>(false);
@@ -89,7 +174,16 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   const [parsedPreviewMb52, setParsedPreviewMb52] = useState<CiclicoItem[]>([]);
   const [parseErrorsMb52, setParseErrorsMb52] = useState<string[]>([]);
 
-  // 3. Procesamiento y Consolidación Automática del Cíclico con 999 y SDIF
+  // Estados para la Revisión / Auditoría en Tablet del Supervisor (Top N SKUs con más diferencias)
+  const [supervisorRevisions, setSupervisorRevisions] = useState<Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string }>>(() => {
+    const cached = localStorage.getItem('nexus_supervisor_revisions');
+    return cached ? JSON.parse(cached) : {};
+  });
+  const [isTabletReviewOpen, setIsTabletReviewOpen] = useState<boolean>(false);
+  const [topNCount, setTopNCount] = useState<number>(10);
+  const [draftRevisions, setDraftRevisions] = useState<Record<string, { cant_contada: number; notas?: string }>>({});
+
+  // 3. Procesamiento y Consolidación Automática del Cíclico con 999 y SDIF (+ Reconteo Supervisor)
   const { itemsConsolidados, metadataCiclico, totalesCiclico } = useMemo(() => {
     const { metadata, rows: ciclicoRows } = parseCiclicoRawText(rawCiclico);
 
@@ -124,7 +218,8 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       ciclicoRows,
       rows999,
       rowsSdif,
-      products
+      products,
+      supervisorRevisions
     );
 
     return {
@@ -132,7 +227,7 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       metadataCiclico: metadata,
       totalesCiclico: consolidado.totales as CiclicoTotales
     };
-  }, [rawCiclico, items, products]);
+  }, [rawCiclico, items, products, supervisorRevisions]);
 
   // Filtrado de la lista del Cíclico Consolidado
   const filteredCiclicoItems = useMemo(() => {
@@ -221,23 +316,110 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     }
   }, [syncMeta]);
 
-  // Guardar nuevo Cíclico Pegado
-  const handleSavePastedCiclico = () => {
+  // Detectar fecha automáticamente al pegar el texto
+  const handlePastedCiclicoChange = (text: string) => {
+    setPastedCiclicoText(text);
+    setCiclicoParseError('');
+    const { metadata } = parseCiclicoRawText(text);
+    if (metadata.fecha_reporte) {
+      const parts = metadata.fecha_reporte.split(/[\/\-\.]/);
+      if (parts.length === 3) {
+        if (parts[2].length === 4) {
+          // DD/MM/YYYY -> YYYY-MM-DD
+          setModalFecha(`${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`);
+        } else if (parts[0].length === 4) {
+          // YYYY-MM-DD
+          setModalFecha(`${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`);
+        }
+      }
+    }
+  };
+
+  const handleCiclicoFileUpload = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const content = e.target?.result as string;
+        handlePastedCiclicoChange(content);
+      } catch (err) {
+        setCiclicoParseError(`Error leyendo archivo: ${err}`);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // Guardar nuevo Cíclico en la Nube y en Estado Local
+  const handleSavePastedCiclico = async () => {
     if (!pastedCiclicoText.trim()) {
-      setCiclicoParseError('Debes pegar el contenido del reporte.');
+      setCiclicoParseError('Debes pegar o cargar el contenido del reporte.');
       return;
     }
-    const { rows } = parseCiclicoRawText(pastedCiclicoText);
+    const { metadata, rows } = parseCiclicoRawText(pastedCiclicoText);
     if (rows.length === 0) {
       setCiclicoParseError('No se detectaron filas válidas de inventario cíclico. Verifica el formato.');
       return;
     }
-    setRawCiclico(pastedCiclicoText);
-    localStorage.setItem('nexus_zonales_raw_ciclico', pastedCiclicoText);
-    setShowCiclicoModal(false);
-    setPastedCiclicoText('');
+
+    setIsSavingDailyCiclico(true);
     setCiclicoParseError('');
-    confetti({ particleCount: 60, spread: 60, origin: { y: 0.5 } });
+    try {
+      // 1. Consolidar temporalmente para obtener totales y conciliaciones exactas
+      const rows999 = items
+        .filter(i => i.almacen === '999')
+        .map(i => ({
+          sku: i.material,
+          centro: 'SGSJ',
+          almacen: '999',
+          lote: i.lote,
+          descripcion: i.texto_breve,
+          stock_disponible: i.cantidad,
+          um: i.umb,
+          ubicacion: 'CD'
+        }));
+
+      const rowsSdif = items
+        .filter(i => i.almacen === 'SDIF')
+        .map(i => ({
+          sku: i.material,
+          descripcion: i.texto_breve,
+          libre_util: i.cantidad,
+          um: i.umb,
+          lote: i.lote,
+          almacen: 'SDIF',
+          valor: i.valor_total,
+          zonal_estimada: i.zonal
+        }));
+
+      const consolidado = consolidarInventario(rows, rows999, rowsSdif, products);
+
+      // 2. Persistir en la Nube (Supabase) para que esté disponible en todos los PCs
+      if (onSaveCiclicoDelDia) {
+        const ok = await onSaveCiclicoDelDia({
+          fecha: modalFecha,
+          rawText: pastedCiclicoText,
+          metadata,
+          totales: consolidado.totales as CiclicoTotales,
+          itemsConsolidados: consolidado.items
+        });
+
+        if (!ok) {
+          setCiclicoParseError('Error guardando en la nube. Revisa la conexión e intenta nuevamente.');
+          return;
+        }
+      }
+
+      setRawCiclico(pastedCiclicoText);
+      setSelectedFecha(modalFecha);
+      localStorage.setItem('nexus_zonales_raw_ciclico', pastedCiclicoText);
+      setShowCiclicoModal(false);
+      setPastedCiclicoText('');
+      setCiclicoParseError('');
+      confetti({ particleCount: 70, spread: 60, origin: { y: 0.5 } });
+    } catch (err) {
+      setCiclicoParseError(`Error procesando reporte: ${err}`);
+    } finally {
+      setIsSavingDailyCiclico(false);
+    }
   };
 
   // Restablecer al Cíclico inicial
@@ -252,6 +434,82 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   // Exportar Excel Consolidado Oficial
   const handleExportOfficialExcel = () => {
     exportarCiclicoAExcel(itemsConsolidados, metadataCiclico, totalesCiclico);
+  };
+
+  // Top SKUs con diferencias seleccionados para auditoría del supervisor (Tablet)
+  const topItemsForReview = useMemo(() => {
+    return [...itemsConsolidados]
+      .filter(item => {
+        const origDife = item.revision_supervisor?.diferencia_original ?? item.diferencia;
+        return origDife !== 0 || item.revisado_supervisor || item.lotes_desglose.some(l => l.diferencia !== 0);
+      })
+      .sort((a, b) => {
+        const difA = Math.abs(a.revision_supervisor?.diferencia_original ?? a.diferencia);
+        const difB = Math.abs(b.revision_supervisor?.diferencia_original ?? b.diferencia);
+        if (difB !== difA) return difB - difA;
+        return Math.abs(b.dif_precio) - Math.abs(a.dif_precio);
+      })
+      .slice(0, topNCount === 999 ? undefined : topNCount);
+  }, [itemsConsolidados, topNCount]);
+
+  const countItemsWithDifferences = useMemo(() => {
+    return itemsConsolidados.filter(i => {
+      const origDife = i.revision_supervisor?.diferencia_original ?? i.diferencia;
+      return origDife !== 0 || i.revisado_supervisor;
+    }).length;
+  }, [itemsConsolidados]);
+
+  // Abrir Modal Tablet con borrador inicial
+  const handleOpenTabletReview = () => {
+    const initialDrafts: Record<string, { cant_contada: number; notas?: string }> = {};
+    topItemsForReview.forEach(item => {
+      if (supervisorRevisions[item.sku]) {
+        initialDrafts[item.sku] = { ...supervisorRevisions[item.sku] };
+      } else {
+        initialDrafts[item.sku] = {
+          cant_contada: item.cant_contada,
+          notas: ''
+        };
+      }
+    });
+    setDraftRevisions(initialDrafts);
+    setIsTabletReviewOpen(true);
+  };
+
+  // Modificar valor en el borrador de la tablet
+  const handleDraftChange = (sku: string, newCount: number, notes?: string) => {
+    setDraftRevisions(prev => ({
+      ...prev,
+      [sku]: {
+        cant_contada: Math.max(0, newCount),
+        notas: notes !== undefined ? notes : prev[sku]?.notas || ''
+      }
+    }));
+  };
+
+  // Aplicar Reconteos del Supervisor
+  const handleApplySupervisorRevisions = () => {
+    const newRevisions = { ...supervisorRevisions };
+    Object.entries(draftRevisions).forEach(([sku, rev]) => {
+      newRevisions[sku] = {
+        cant_contada: Number(rev.cant_contada),
+        notas: rev.notas?.trim(),
+        supervisor_nombre: currentUser?.nombre || 'Supervisor CD'
+      };
+    });
+    setSupervisorRevisions(newRevisions);
+    localStorage.setItem('nexus_supervisor_revisions', JSON.stringify(newRevisions));
+    setIsTabletReviewOpen(false);
+    confetti({ particleCount: 70, spread: 60, origin: { y: 0.6 } });
+  };
+
+  // Deshacer / Restablecer Conteo Original
+  const handleClearSupervisorRevisions = () => {
+    if (window.confirm('¿Deseas eliminar las modificaciones de reconteo del supervisor y volver al 1er conteo original del cíclico?')) {
+      setSupervisorRevisions({});
+      localStorage.removeItem('nexus_supervisor_revisions');
+      confetti({ particleCount: 30, spread: 50 });
+    }
   };
 
   // Parser de datos MB52 (SDIF / 999)
@@ -415,7 +673,7 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Boxes className="w-5 h-5 text-[#008744]" />
               <h2 className="text-base font-extrabold text-slate-800">
                 Inventario Cíclico CD Frío (Picking) & Almacenes 999 / SDIF
@@ -423,25 +681,63 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
               <span className="text-[10px] bg-emerald-100 text-[#008744] font-black px-2 py-0.5 rounded-full border border-emerald-300">
                 SGSJ Santiago CD
               </span>
+              <span className="text-[10px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-200 flex items-center gap-1">
+                <Cloud className="w-3 h-3 text-blue-600" />
+                Persistencia en la Nube Activa
+              </span>
             </div>
             <p className="text-xs text-slate-500 mt-1">
               Cuadratura física de picking por SKU y conciliación compensada con diferencias de almacenes externos.
             </p>
           </div>
 
-          {/* Botones de Acción */}
+          {/* Selector de Historial Diario Persistido en Supabase y Botones de Acción */}
           <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-2 bg-slate-100 border border-slate-200/90 px-3 py-1.5 rounded-xl">
+              <Calendar className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span className="text-xs font-black text-slate-700">Día:</span>
+              <select
+                value={selectedFecha}
+                onChange={e => handleSelectFecha(e.target.value)}
+                className="bg-white border border-slate-300 rounded-lg text-xs font-black text-slate-800 py-1 px-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer max-w-[210px] truncate"
+              >
+                {ciclicoHistorial && ciclicoHistorial.length > 0 ? (
+                  ciclicoHistorial.map(h => {
+                    const cleanDate = h.fecha ? h.fecha.split('T')[0] : '';
+                    return (
+                      <option key={h.id || h.fecha} value={cleanDate}>
+                        {formatChileanDate(cleanDate)} {cleanDate === getTodayChile() ? '(Hoy)' : ''} — {h.usuario || 'AMELLA'}
+                      </option>
+                    );
+                  })
+                ) : (
+                  <option value={selectedFecha}>{formatChileanDate(selectedFecha)} (Hoy)</option>
+                )}
+              </select>
+
+              {onRefreshCiclicoHistorial && (
+                <button
+                  onClick={() => onRefreshCiclicoHistorial()}
+                  title="Refrescar historial desde la nube"
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded-md transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingHistorial ? 'animate-spin text-emerald-600' : ''}`} />
+                </button>
+              )}
+            </div>
+
             <button
               onClick={() => {
+                setModalFecha(getTodayChile());
                 setShowCiclicoModal(true);
                 setPastedCiclicoText('');
                 setCiclicoParseError('');
               }}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#008744] hover:bg-[#007038] text-white rounded-xl text-xs font-black shadow-xs transition-all active:scale-95 cursor-pointer"
-              title="Pegar nuevo reporte Monitor de inventario de SAP"
+              title="Cargar o actualizar el reporte cíclico del día en la nube"
             >
               <ClipboardPaste className="w-4 h-4" />
-              <span>Cargar / Pegar Cíclico</span>
+              <span>Cargar Cíclico del Día</span>
             </button>
 
             <button
@@ -564,6 +860,38 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       {activeSubTab === 'resultado' && (
         <div className="space-y-5">
           
+          {/* Banner de Fecha Activa y Persistencia en la Nube */}
+          <div className="bg-emerald-50/70 border border-emerald-200/90 p-3 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Calendar className="w-4 h-4 text-emerald-700" />
+              <span className="font-bold text-slate-700">
+                Inventario Cíclico del Día:
+              </span>
+              <span className="font-black text-emerald-950 bg-white px-2.5 py-0.5 rounded-lg border border-emerald-300 font-mono text-xs shadow-2xs">
+                {formatChileanDate(selectedFecha)}
+              </span>
+              {selectedFecha === getTodayChile() ? (
+                <span className="bg-emerald-600 text-white font-black text-[10px] px-2 py-0.5 rounded-full shadow-2xs">
+                  HOY
+                </span>
+              ) : (
+                <span className="bg-slate-200 text-slate-700 font-bold text-[10px] px-2 py-0.5 rounded-full">
+                  HISTÓRICO
+                </span>
+              )}
+              {activeHistorialItem?.usuario && (
+                <span className="text-[11px] text-slate-500 font-medium">
+                  Guardado por: <strong className="text-slate-800">{activeHistorialItem.usuario}</strong> ({activeHistorialItem.hora || ''})
+                </span>
+              )}
+            </div>
+
+            <div className="text-[11px] text-slate-600 font-medium flex items-center gap-1.5 bg-white/70 px-2.5 py-1 rounded-lg border border-emerald-200/60">
+              <Cloud className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>Sincronizado en la nube (compartido en tiempo real en todos los PCs)</span>
+            </div>
+          </div>
+          
           {/* BLOQUE OFICIAL: LAS DOS TABLAS EJECUTIVAS CIAL (IDÉNTICAS AL REPORTE) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             
@@ -679,6 +1007,77 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
             </div>
           </div>
 
+          {/* BANNER AUDITORÍA EN TERRENO (TABLET): RECONTEO TOP N SKUS */}
+          <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 shadow-md border border-indigo-900/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-start sm:items-center gap-3.5">
+              <div className="p-3 bg-indigo-600/30 border border-indigo-500/40 text-indigo-400 rounded-2xl shrink-0">
+                <Tablet className="w-6 h-6 text-indigo-300" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="font-extrabold text-white text-sm sm:text-base">
+                    Auditoría en Terreno (Tablet) — Reconteo de Supervisor
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    {countItemsWithDifferences} SKUs con descuadre
+                  </span>
+                  {Object.keys(supervisorRevisions).length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      ✓ {Object.keys(supervisorRevisions).length} auditados
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-indigo-200/80 mt-1 max-w-2xl">
+                  Inspección física en rack de los SKUs con mayores diferencias. El supervisor ajusta el reconteo real para modificar la diferencia final y habilitar la cascada de conciliación (<strong>999 CD</strong> y luego <strong>SDIF Zonales</strong>).
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              {/* Selector de Top N */}
+              <div className="flex items-center bg-slate-800/80 border border-slate-700/80 rounded-xl p-1 text-xs">
+                <span className="px-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Top:</span>
+                {[5, 10, 15, 20, 999].map(n => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setTopNCount(n)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                      topNCount === n
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
+                    }`}
+                  >
+                    {n === 999 ? 'Todos' : n}
+                  </button>
+                ))}
+              </div>
+
+              {/* Botón Abrir Tablet */}
+              <button
+                type="button"
+                onClick={handleOpenTabletReview}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white text-xs font-black rounded-xl shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+              >
+                <Tablet className="w-4 h-4 text-indigo-200" />
+                <span>Auditar en Tablet ({topItemsForReview.length})</span>
+              </button>
+
+              {/* Botón Deshacer / Resetear si existen cambios */}
+              {Object.keys(supervisorRevisions).length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearSupervisorRevisions}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-rose-950/40 text-slate-300 hover:text-rose-300 border border-slate-700 hover:border-rose-800/60 text-xs font-bold rounded-xl transition-all cursor-pointer"
+                  title="Restablecer todos los reconteos al 1er conteo original del operador"
+                >
+                  <Undo2 className="w-3.5 h-3.5" />
+                  <span>Restablecer</span>
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* BARRA DE FILTROS Y BÚSQUEDA DEL CÍCLICO */}
           <div className="bg-white p-4 rounded-2xl shadow-xs border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
             
@@ -763,13 +1162,14 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                             item.diferencia < 0 ? 'bg-rose-50/20' : (item.diferencia > 0 ? 'bg-blue-50/20' : '')
                           }`}>
                             
-                            {/* Botón Desplegar Lotes */}
+                            {/* Botón Desplegar Lotes / Auditoría */}
                             <td className="p-3 text-center">
-                              {item.lotes_desglose.length > 1 ? (
+                              {item.lotes_desglose.length > 1 || item.revisado_supervisor ? (
                                 <button
+                                  type="button"
                                   onClick={() => setExpandedSku(isExpanded ? null : item.sku)}
                                   className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-600 cursor-pointer"
-                                  title="Ver detalle por lotes"
+                                  title="Ver detalle por lotes o reconteo supervisor"
                                 >
                                   {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
                                 </button>
@@ -801,7 +1201,18 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
                             {/* Cant Contada */}
                             <td className="p-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
-                              {item.cant_contada}
+                              <div className="flex flex-col items-end">
+                                <span>{item.cant_contada}</span>
+                                {item.revisado_supervisor && (
+                                  <span 
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-black bg-amber-100 text-amber-900 border border-amber-300 mt-0.5"
+                                    title={`Reconteo en Terreno por ${item.revision_supervisor?.supervisor_nombre || 'Supervisor'}. Conteo original: ${item.revision_supervisor?.cant_contada_original} CJ.`}
+                                  >
+                                    <ClipboardCheck className="w-2.5 h-2.5 text-amber-700" />
+                                    <span>Sup. ({item.revision_supervisor?.cant_contada_original} ➔ {item.cant_contada})</span>
+                                  </span>
+                                )}
+                              </div>
                             </td>
 
                             {/* Diferencia CJ y UN */}
@@ -872,29 +1283,69 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
                           </tr>
 
-                          {/* Detalle Expandido de Lotes */}
-                          {isExpanded && item.lotes_desglose.length > 0 && (
+                          {/* Detalle Expandido de Lotes y Auditoría */}
+                          {isExpanded && (item.lotes_desglose.length > 0 || item.revisado_supervisor) && (
                             <tr className="bg-slate-50/90 border-y border-slate-200">
                               <td colSpan={11} className="p-4 pl-12">
-                                <div className="text-[11px] font-bold text-slate-700 mb-2">
-                                  Desglose de Conteo por Lote de este Producto (Auditoría):
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                                  {item.lotes_desglose.map((l, lIdx) => (
-                                    <div key={lIdx} className="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs text-[11px]">
-                                      <div className="flex justify-between items-center font-mono font-bold text-slate-800">
-                                        <span>Lote: {l.lote}</span>
-                                        <span className={l.diferencia < 0 ? 'text-rose-600' : (l.diferencia > 0 ? 'text-blue-600' : 'text-slate-500')}>
-                                          {l.diferencia > 0 ? `+${l.diferencia}` : l.diferencia} CJ
-                                        </span>
+                                {/* Banner de Auditoría del Supervisor si fue revisado */}
+                                {item.revisado_supervisor && item.revision_supervisor && (
+                                  <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                                    <div className="flex items-start gap-2.5">
+                                      <div className="p-1.5 bg-amber-200/80 text-amber-800 rounded-lg shrink-0 mt-0.5">
+                                        <ClipboardCheck className="w-4 h-4 text-amber-800" />
                                       </div>
-                                      <div className="text-slate-500 text-[10px] mt-0.5 flex justify-between">
-                                        <span>Sist: {l.cant_sistema} | Cont: {l.cant_contada}</span>
-                                        <span>{l.fecha_lote || ''}</span>
+                                      <div>
+                                        <div className="font-bold text-xs flex items-center gap-2">
+                                          <span>Auditoría Física en Terreno ({item.revision_supervisor.supervisor_nombre || 'Supervisor CD'})</span>
+                                          <span className="text-[10px] text-amber-700 font-mono font-normal">
+                                            {item.revision_supervisor.fecha_revision}
+                                          </span>
+                                        </div>
+                                        <p className="text-[11px] text-amber-900 mt-0.5">
+                                          1er Conteo Operador: <strong>{item.revision_supervisor.cant_contada_original} CJ</strong> (Dif: {item.revision_supervisor.diferencia_original} CJ) ➔ 
+                                          Reconteo Físico Supervisor: <strong>{item.revision_supervisor.cant_contada_supervisor} CJ</strong> (Dif Real: <strong>{item.revision_supervisor.diferencia_supervisor > 0 ? `+${item.revision_supervisor.diferencia_supervisor}` : item.revision_supervisor.diferencia_supervisor} CJ</strong>).
+                                        </p>
+                                        {item.revision_supervisor.notas && (
+                                          <p className="text-[11px] text-amber-950 font-medium italic mt-1 bg-amber-100/70 border border-amber-200/60 px-2.5 py-1 rounded-md">
+                                            "{item.revision_supervisor.notas}"
+                                          </p>
+                                        )}
                                       </div>
                                     </div>
-                                  ))}
-                                </div>
+                                    <button
+                                      type="button"
+                                      onClick={handleOpenTabletReview}
+                                      className="inline-flex items-center gap-1 px-3 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-900 font-bold text-xs rounded-lg transition-colors cursor-pointer shrink-0 self-start sm:self-auto shadow-2xs"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                      <span>Editar en Tablet</span>
+                                    </button>
+                                  </div>
+                                )}
+
+                                {item.lotes_desglose.length > 0 && (
+                                  <>
+                                    <div className="text-[11px] font-bold text-slate-700 mb-2">
+                                      Desglose de Conteo por Lote de este Producto (Auditoría SAP):
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                                      {item.lotes_desglose.map((l, lIdx) => (
+                                        <div key={lIdx} className="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs text-[11px]">
+                                          <div className="flex justify-between items-center font-mono font-bold text-slate-800">
+                                            <span>Lote: {l.lote}</span>
+                                            <span className={l.diferencia < 0 ? 'text-rose-600' : (l.diferencia > 0 ? 'text-blue-600' : 'text-slate-500')}>
+                                              {l.diferencia > 0 ? `+${l.diferencia}` : l.diferencia} CJ
+                                            </span>
+                                          </div>
+                                          <div className="text-slate-500 text-[10px] mt-0.5 flex justify-between">
+                                            <span>Sist: {l.cant_sistema} | Cont: {l.cant_contada}</span>
+                                            <span>{l.fecha_lote || ''}</span>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </>
+                                )}
                               </td>
                             </tr>
                           )}
@@ -1113,10 +1564,58 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
             </div>
 
             <div className="p-5 flex-1 overflow-y-auto space-y-4">
+              {/* Selector de Fecha del Inventario Cíclico */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-emerald-50/90 border border-emerald-200 rounded-xl">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-emerald-700 shrink-0" />
+                  <div>
+                    <label className="text-xs font-black text-emerald-950 block">
+                      Fecha del Cíclico (Día de Conteo):
+                    </label>
+                    <span className="text-[11px] text-emerald-800">
+                      Se guardará en la nube para esta fecha y persistirá en todos los PCs.
+                    </span>
+                  </div>
+                </div>
+                <input
+                  type="date"
+                  value={modalFecha}
+                  onChange={e => setModalFecha(e.target.value)}
+                  className="px-3 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer shadow-2xs"
+                />
+              </div>
+
+              {/* Opción para subir archivo de texto o TSV de SAP */}
+              <div className="p-3 bg-slate-50 border-2 border-dashed border-slate-300 hover:border-emerald-500 rounded-xl transition-all text-center">
+                <input
+                  type="file"
+                  id="ciclico-file-upload"
+                  accept=".txt,.tsv,.csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={e => {
+                    if (e.target.files?.[0]) {
+                      handleCiclicoFileUpload(e.target.files[0]);
+                    }
+                  }}
+                />
+                <label
+                  htmlFor="ciclico-file-upload"
+                  className="cursor-pointer flex flex-col items-center justify-center gap-1"
+                >
+                  <FileSpreadsheet className="w-6 h-6 text-emerald-600" />
+                  <span className="text-xs font-bold text-slate-800">
+                    Cargar archivo exportado de SAP (o pegar abajo)
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    Haz clic aquí si guardaste el reporte en archivo de texto o TSV
+                  </span>
+                </label>
+              </div>
+
               <textarea
                 value={pastedCiclicoText}
-                onChange={e => setPastedCiclicoText(e.target.value)}
-                rows={10}
+                onChange={e => handlePastedCiclicoChange(e.target.value)}
+                rows={8}
                 placeholder="Pega aquí el reporte copiado desde SAP... (Docto, Material, Cant. Sistema, Cant. Contada, Dife, Precio, Dif Precio...)"
                 className="w-full p-3 font-mono text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-[#008744]"
               />
@@ -1138,9 +1637,20 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
               </button>
               <button
                 onClick={handleSavePastedCiclico}
-                className="px-5 py-2 bg-[#008744] hover:bg-[#007038] text-white text-xs font-black rounded-xl shadow-xs transition-all cursor-pointer"
+                disabled={isSavingDailyCiclico}
+                className="px-5 py-2 bg-[#008744] hover:bg-[#007038] disabled:opacity-50 text-white text-xs font-black rounded-xl shadow-xs transition-all cursor-pointer flex items-center gap-2"
               >
-                Procesar y Cuadrar Inventario
+                {isSavingDailyCiclico ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Guardando en la Nube...</span>
+                  </>
+                ) : (
+                  <>
+                    <Cloud className="w-3.5 h-3.5" />
+                    <span>Guardar Cíclico en la Nube y Cuadrar</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1249,6 +1759,318 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                 {isSyncing ? 'Guardando...' : `Confirmar y Cargar (${parsedPreviewMb52.length})`}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL AUDITORÍA EN TABLET (TOP N SKUS CON DIFERENCIAS - SUPERVISOR)       */}
+      {/* ========================================================================= */}
+      {isTabletReviewOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 md:p-6 animate-in fade-in duration-150">
+          <div className="bg-slate-900 text-white rounded-3xl shadow-2xl border border-slate-700 max-w-5xl w-full h-[94vh] flex flex-col overflow-hidden">
+            
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-950 flex flex-col md:flex-row md:items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-indigo-600 text-white rounded-2xl shadow-md shadow-indigo-600/30">
+                  <Tablet className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-base sm:text-lg font-black text-white">
+                      Auditoría en Terreno — Tablet Supervisor
+                    </h2>
+                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                      Picking Outbound (PCG)
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Inspección física en rack. Ajusta el reconteo real para modificar la diferencia y habilitar la cascada (<strong>999 CD ➔ SDIF Zonales</strong>).
+                  </p>
+                </div>
+              </div>
+
+              {/* Selector de Top N + Botón Cerrar */}
+              <div className="flex items-center gap-3">
+                <div className="flex items-center bg-slate-800 border border-slate-700 rounded-xl p-1 text-xs">
+                  <span className="px-2 text-[10px] font-bold text-slate-400 uppercase">Top:</span>
+                  {[5, 10, 15, 20, 999].map(n => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setTopNCount(n)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        topNCount === n
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {n === 999 ? 'Todos' : n}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsTabletReviewOpen(false)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+                  title="Cerrar sin guardar cambios"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body: Cards de SKUs Táctiles */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 bg-slate-900/90">
+              {topItemsForReview.length === 0 ? (
+                <div className="text-center py-16 text-slate-400">
+                  <ClipboardCheck className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+                  <p className="text-sm font-bold text-slate-300">No hay SKUs con diferencias para auditar.</p>
+                  <p className="text-xs text-slate-500 mt-1">Todos los productos del inventario se encuentran perfectamente cuadrados ($0 impacto).</p>
+                </div>
+              ) : (
+                topItemsForReview.map((item, index) => {
+                  const draft = draftRevisions[item.sku] ?? {
+                    cant_contada: supervisorRevisions[item.sku]?.cant_contada ?? item.cant_contada,
+                    notas: supervisorRevisions[item.sku]?.notas ?? ''
+                  };
+                  const currentCount = draft.cant_contada;
+                  const originalCount = item.revision_supervisor?.cant_contada_original ?? item.cant_contada;
+                  const draftDife = currentCount - item.cant_sistema;
+                  const draftDifePrecio = draftDife * item.precio_unitario;
+                  const isModified = currentCount !== originalCount;
+
+                  return (
+                    <div 
+                      key={item.sku}
+                      className={`rounded-2xl border p-4 sm:p-5 transition-all ${
+                        isModified 
+                          ? 'bg-slate-800/95 border-indigo-500/70 shadow-lg shadow-indigo-950/40' 
+                          : 'bg-slate-800/50 border-slate-700/70 hover:border-slate-600'
+                      }`}
+                    >
+                      {/* Top Bar de la Card */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-700/60">
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-6 h-6 rounded-lg bg-slate-700 text-slate-300 flex items-center justify-center text-xs font-black">
+                            #{index + 1}
+                          </span>
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-mono font-black">
+                            <MapPin className="w-3.5 h-3.5 text-indigo-400" />
+                            {item.ubicacion || 'Sin Ubic.'}
+                          </span>
+                          <span className="font-mono font-black text-sm text-white">
+                            SKU: {item.sku}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 font-mono">
+                            ${item.precio_unitario.toLocaleString('es-CL')} / CJ
+                          </span>
+                          {isModified && (
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black bg-indigo-500 text-white shadow-xs">
+                              Modificado
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Descripción del Producto */}
+                      <div className="py-2.5 text-sm font-bold text-slate-200">
+                        {item.descripcion}
+                        <span className="text-xs text-slate-400 font-normal ml-2">
+                          (Factor: {item.factor_empaque} UN/CJ)
+                        </span>
+                      </div>
+
+                      {/* Grilla Comparativa Táctil */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                        {/* 1. Cantidad Sistema SAP */}
+                        <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-700/60 text-center flex flex-col justify-between">
+                          <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">
+                            1. Sistema SAP
+                          </span>
+                          <div className="text-2xl font-black font-mono text-slate-200 my-1">
+                            {item.cant_sistema}
+                          </div>
+                          <span className="text-[10px] text-slate-400">Cajas teóricas</span>
+                        </div>
+
+                        {/* 2. Primer Conteo Operador */}
+                        <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-700/60 text-center flex flex-col justify-between">
+                          <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">
+                            2. 1er Conteo Operador
+                          </span>
+                          <div className="text-2xl font-black font-mono text-slate-300 my-1">
+                            {originalCount}
+                          </div>
+                          <span className={`text-[10px] font-mono font-bold ${
+                            originalCount - item.cant_sistema < 0 ? 'text-rose-400' : (originalCount - item.cant_sistema > 0 ? 'text-blue-400' : 'text-emerald-400')
+                          }`}>
+                            Dif: {originalCount - item.cant_sistema > 0 ? `+${originalCount - item.cant_sistema}` : originalCount - item.cant_sistema} CJ
+                          </span>
+                        </div>
+
+                        {/* 3. Reconteo Físico Supervisor (Stepper Táctil) */}
+                        <div className="bg-slate-900/95 p-3 rounded-xl border-2 border-indigo-500/80 col-span-2 md:col-span-1 shadow-inner flex flex-col justify-between">
+                          <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider block text-center">
+                            3. Reconteo Físico Supervisor
+                          </span>
+                          
+                          <div className="flex items-center justify-center gap-2 my-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDraftChange(item.sku, Math.max(0, currentCount - 1), draft.notas)}
+                              className="w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-black text-lg border border-slate-600 transition-all cursor-pointer"
+                              title="Restar 1 caja"
+                            >
+                              <Minus className="w-5 h-5" />
+                            </button>
+                            
+                            <input
+                              type="number"
+                              min="0"
+                              value={isNaN(currentCount) ? '' : currentCount}
+                              onChange={e => {
+                                const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+                                handleDraftChange(item.sku, isNaN(val) ? 0 : val, draft.notas);
+                              }}
+                              className="w-20 h-10 text-center bg-slate-950 border border-indigo-500/60 rounded-xl font-mono text-xl font-black text-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                            />
+
+                            <button
+                              type="button"
+                              onClick={() => handleDraftChange(item.sku, currentCount + 1, draft.notas)}
+                              className="w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-black text-lg border border-slate-600 transition-all cursor-pointer"
+                              title="Sumar 1 caja"
+                            >
+                              <Plus className="w-5 h-5" />
+                            </button>
+                          </div>
+
+                          {/* Botones de Acción Rápida */}
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDraftChange(item.sku, item.cant_sistema, draft.notas)}
+                              className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-lg text-[10px] font-bold transition-all cursor-pointer"
+                              title="Ajustar a la cantidad teórica del sistema (Cuadrar)"
+                            >
+                              ✓ Cuadrar ({item.cant_sistema})
+                            </button>
+                            {isModified && (
+                              <button
+                                type="button"
+                                onClick={() => handleDraftChange(item.sku, originalCount, draft.notas)}
+                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 rounded-lg text-[10px] font-bold transition-all cursor-pointer"
+                                title="Volver al primer conteo reportado por el operador"
+                              >
+                                ↩ 1er Conteo ({originalCount})
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 4. Diferencia Real Resultante */}
+                        <div className={`p-3 rounded-xl border text-center flex flex-col justify-between ${
+                          draftDife === 0 
+                            ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                            : draftDife < 0 
+                              ? 'bg-rose-950/40 border-rose-500/50 text-rose-300'
+                              : 'bg-blue-950/40 border-blue-500/50 text-blue-300'
+                        }`}>
+                          <div>
+                            <span className="text-[10px] font-black uppercase tracking-wider block">
+                              4. Diferencia Real
+                            </span>
+                            <div className="text-2xl font-black font-mono my-1">
+                              {draftDife > 0 ? `+${draftDife}` : draftDife} CJ
+                            </div>
+                            <div className="text-xs font-mono font-bold">
+                              {draftDifePrecio < 0 
+                                ? `- $${Math.abs(draftDifePrecio).toLocaleString('es-CL')}` 
+                                : (draftDifePrecio > 0 ? `+ $${draftDifePrecio.toLocaleString('es-CL')}` : '$0')}
+                            </div>
+                          </div>
+                          <div className="mt-2">
+                            {draftDife === 0 && (
+                              <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-emerald-500/30 text-emerald-300 border border-emerald-500/40">
+                                100% Cuadrado
+                              </span>
+                            )}
+                            {draftDife < 0 && (
+                              <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-rose-500/30 text-rose-300 border border-rose-500/40">
+                                Faltante Real
+                              </span>
+                            )}
+                            {draftDife > 0 && (
+                              <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-500/30 text-blue-300 border border-blue-500/40" title="Habilita conciliación con Almacén 999 y luego SDIF">
+                                Sobrante Real ➔ Cruce
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Campo de Notas de Terreno */}
+                      <div className="mt-3 pt-3 border-t border-slate-700/60 flex items-center gap-2">
+                        <Edit3 className="w-4 h-4 text-slate-500 shrink-0" />
+                        <input
+                          type="text"
+                          placeholder="Notas de terreno (ej: pallet mal rotulado, producto en doble fondo, lote cruzado con 008...)"
+                          value={draft.notas || ''}
+                          onChange={e => handleDraftChange(item.sku, currentCount, e.target.value)}
+                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Modal Sticky Footer */}
+            <div className="p-4 sm:p-5 border-t border-slate-800 bg-slate-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-4 text-xs">
+                <div>
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold">SKUs en Revisión:</span>
+                  <span className="font-mono font-black text-white text-sm">{topItemsForReview.length} productos</span>
+                </div>
+                <div className="h-8 w-px bg-slate-800" />
+                <div>
+                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Modificados:</span>
+                  <span className="font-mono font-black text-indigo-400 text-sm">
+                    {Object.keys(draftRevisions).filter(sku => {
+                      const item = itemsConsolidados.find(i => i.sku === sku);
+                      const orig = item?.revision_supervisor?.cant_contada_original ?? item?.cant_contada;
+                      return draftRevisions[sku]?.cant_contada !== orig;
+                    }).length} SKUs ajustados
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsTabletReviewOpen(false)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-700 text-slate-300 hover:bg-slate-800 text-xs font-bold transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplySupervisorRevisions}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#008744] hover:bg-emerald-600 active:scale-95 text-white text-xs font-black rounded-xl shadow-lg shadow-emerald-900/40 transition-all cursor-pointer"
+                >
+                  <Save className="w-4 h-4 text-white" />
+                  <span>Aplicar Revisión y Conciliar</span>
+                </button>
+              </div>
+            </div>
+
           </div>
         </div>
       )}
