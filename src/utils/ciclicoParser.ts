@@ -485,14 +485,19 @@ export function consolidarInventario(
 
       if (haySobrante && totalStock999 > 0) {
         // PRIORIDAD 999: solo stock positivo. Se concilia HASTA el monto del sobrante.
-        // Lo que quede por conciliar pasa a SDIF.
-        cajasConciliadas999 = Math.min(difeFinal, totalCajas999);
+        // Las cajas en picking son enteras (sin decimales): Math.floor para no conciliar fracciones de caja.
+        const maxCajasPosibles = factorEmpaque > 0 ? Math.floor(totalStock999 / factorEmpaque) : Math.floor(totalStock999);
+        cajasConciliadas999 = Math.min(Math.floor(difeFinal), maxCajasPosibles);
         unidadesConciliadas = cajasConciliadas999 * factorEmpaque;
         valorConciliado999 = Math.round(cajasConciliadas999 * factorEmpaque * precio);
-        esConciliado = true;
-        countConciliados999++;
-        sumMontoConciliado999 += valorConciliado999;
-        accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) del stock positivo en 999. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
+        if (cajasConciliadas999 > 0) {
+          esConciliado = true;
+          countConciliados999++;
+          sumMontoConciliado999 += valorConciliado999;
+          accion = `Conciliado con 999: ${cajasConciliadas999} CJ (${unidadesConciliadas} UN) del stock positivo en 999. Valor: $${valorConciliado999.toLocaleString('es-CL')}`;
+        } else {
+          accion = `Stock en 999 (${totalStock999} UN) insuficiente para completar 1 CJ entera (${factorEmpaque} UN/CJ).`;
+        }
       } else if (difeFinal <= 0) {
         accion = `Sin sobrante en cíclico. Existencia en 999: ${totalCajas999} CJ (${totalStock999} UN). No aplica conciliación.`;
       } else {
@@ -542,15 +547,20 @@ export function consolidarInventario(
       let accion = '';
 
       if (haySobranteParaSdif) {
-        // Concilia hasta la cantidad del sobrante remanente
-        cajasConciliadasSdif = Math.min(sobranteRemanenteParaSdif, totalCajasSdif);
+        // Concilia hasta la cantidad del sobrante remanente (Cajas enteras sin decimales)
+        const maxCajasSdifEnteras = factorEmpaque > 0 ? Math.floor(totalLibreUtil / factorEmpaque) : Math.floor(totalLibreUtil);
+        cajasConciliadasSdif = Math.min(Math.floor(sobranteRemanenteParaSdif), maxCajasSdifEnteras);
         unidadesConciliadasSdif = cajasConciliadasSdif * factorEmpaque;
         valorConciliadoSdif = Math.round(cajasConciliadasSdif * factorEmpaque * precio);
-        esConciliadoSdif = true;
-        countConciliadosSdif++;
-        sumMontoConciliadoSdif += valorConciliadoSdif;
-        accion = `Conciliado con SDIF: ${cajasConciliadasSdif} CJ (${unidadesConciliadasSdif} UN) de saldo zonal tras cruce 999. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
-        if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
+        if (cajasConciliadasSdif > 0) {
+          esConciliadoSdif = true;
+          countConciliadosSdif++;
+          sumMontoConciliadoSdif += valorConciliadoSdif;
+          accion = `Conciliado con SDIF: ${cajasConciliadasSdif} CJ (${unidadesConciliadasSdif} UN) de saldo zonal tras cruce 999. Valor: $${valorConciliadoSdif.toLocaleString('es-CL')}`;
+          if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
+        } else {
+          accion = `Saldo SDIF insuficiente para completar 1 CJ entera (${factorEmpaque} UN/CJ).`;
+        }
       } else if (difeFinal > 0 && cajasConciliadas999 >= difeFinal) {
         accion = `Sobrante (+${difeFinal} CJ) compensado totalmente en Almacén 999. Registro informativo SDIF: ${totalCajasSdif} CJ (${totalLibreUtil} UN).`;
         if (zonalesList.length > 0) accion += ` Zonales: ${zonalesList.join(', ')}.`;
