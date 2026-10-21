@@ -15,6 +15,7 @@ import * as XLSX from 'xlsx';
 import confetti from 'canvas-confetti';
 import { Product } from '../types';
 import { parsePastedMasterData } from '../utils/excel';
+import { getProductPackagingInfo } from '../utils/productUtils';
 
 interface MasterProductsViewProps {
   products: Product[];
@@ -186,41 +187,67 @@ export const MasterProductsView: React.FC<MasterProductsViewProps> = ({
                 <th className="p-3">Descripción de Material</th>
                 <th className="p-3">Categoría</th>
                 <th className="p-3 text-center">UMV</th>
-                <th className="p-3 text-right">Peso Neto</th>
-                <th className="p-3 text-right">Peso Bruto</th>
+                <th className="p-3 text-center">UN / CJ</th>
+                <th className="p-3 text-right">Peso Caja (Bruto)</th>
                 <th className="p-3 text-center">Tipo Peso</th>
                 <th className="p-3 text-center">Estado</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredProducts.slice(0, 100).map(p => (
-                <tr key={p.sku} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="p-3 font-mono font-bold text-slate-900">{p.sku}</td>
-                  <td className="p-3 font-semibold text-slate-800">{p.descripcion}</td>
-                  <td className="p-3 text-slate-500">{p.categoria || '—'}</td>
-                  <td className="p-3 text-center font-bold">{p.um_venta || p.unidad}</td>
-                  <td className="p-3 text-right font-mono font-semibold">{p.neto} kg</td>
-                  <td className="p-3 text-right font-mono text-slate-500">{p.bruto} kg</td>
-                  <td className="p-3 text-center">
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                      p.tipo_peso.includes('Variable')
-                        ? 'bg-amber-100 text-amber-800'
-                        : 'bg-slate-100 text-slate-700'
-                    }`}>
-                      {p.tipo_peso}
-                    </span>
-                  </td>
-                  <td className="p-3 text-center">
-                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                      p.estado === 'Bloqueado'
-                        ? 'bg-rose-100 text-rose-800'
-                        : 'bg-emerald-100 text-[#008744]'
-                    }`}>
-                      {p.estado}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {filteredProducts.slice(0, 100).map(p => {
+                const info = getProductPackagingInfo(p);
+                return (
+                  <tr key={p.sku} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="p-3 font-mono font-bold text-slate-900">{p.sku}</td>
+                    <td className="p-3 font-semibold text-slate-800">{p.descripcion}</td>
+                    <td className="p-3 text-slate-500">{p.categoria || '—'}</td>
+                    <td className="p-3 text-center font-bold">
+                      <span className={`px-2 py-0.5 rounded text-[11px] font-black ${
+                        info.esCaja ? 'bg-amber-100 text-amber-900' : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        {info.um}
+                      </span>
+                    </td>
+                    <td className="p-3 text-center font-bold">
+                      {info.esCaja ? (
+                        <span className="font-mono text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 text-[11px] font-black">
+                          {info.unidadesPorCajaText}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-mono">{info.unidadesPorCajaText}</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-right whitespace-nowrap">
+                      <div className="font-mono font-bold text-slate-900">
+                        {info.pesoCaja} kg
+                      </div>
+                      {info.esCaja && info.factor > 1 && info.pesoUnitario > 0 && (
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          ({info.pesoUnitario} kg/un)
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3 text-center">
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                        p.tipo_peso.includes('Variable')
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        {p.tipo_peso}
+                      </span>
+                    </td>
+                    <td className="p-3 text-center">
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                        p.estado === 'Bloqueado'
+                          ? 'bg-rose-100 text-rose-800'
+                          : 'bg-emerald-100 text-[#008744]'
+                      }`}>
+                        {p.estado}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -352,23 +379,26 @@ export const MasterProductsView: React.FC<MasterProductsViewProps> = ({
                         <tr>
                           <th className="p-2">SKU</th>
                           <th className="p-2">Descripción</th>
-                          <th className="p-2">UMV</th>
-                          <th className="p-2 text-right">Neto (kg)</th>
-                          <th className="p-2 text-right">Bruto (kg)</th>
+                          <th className="p-2 text-center">UMV</th>
+                          <th className="p-2 text-center">UN / CJ</th>
+                          <th className="p-2 text-right">Peso Caja (kg)</th>
                           <th className="p-2">Estado</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-mono">
-                        {parsedPreview.slice(0, 5).map(p => (
-                          <tr key={p.sku} className="hover:bg-slate-50">
-                            <td className="p-2 font-bold text-slate-900">{p.sku}</td>
-                            <td className="p-2 font-sans font-medium text-slate-800 truncate max-w-xs">{p.descripcion}</td>
-                            <td className="p-2">{p.um_venta || p.unidad}</td>
-                            <td className="p-2 text-right">{p.neto}</td>
-                            <td className="p-2 text-right">{p.bruto}</td>
-                            <td className="p-2 font-sans">{p.estado}</td>
-                          </tr>
-                        ))}
+                        {parsedPreview.slice(0, 5).map(p => {
+                          const info = getProductPackagingInfo(p);
+                          return (
+                            <tr key={p.sku} className="hover:bg-slate-50">
+                              <td className="p-2 font-bold text-slate-900">{p.sku}</td>
+                              <td className="p-2 font-sans font-medium text-slate-800 truncate max-w-xs">{p.descripcion}</td>
+                              <td className="p-2 text-center">{info.um}</td>
+                              <td className="p-2 text-center font-bold text-emerald-800">{info.unidadesPorCajaText}</td>
+                              <td className="p-2 text-right font-bold text-slate-900">{info.pesoCaja}</td>
+                              <td className="p-2 font-sans">{p.estado}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

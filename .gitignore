@@ -38,4 +38,10 @@ scripts/
 *.py
 __pycache__/
 *.pyc
+# Build caches
+*.tsbuildinfo
+.vercel
+
+# Build caches
+*.tsbuildinfo
 .vercel

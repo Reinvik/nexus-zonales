@@ -30,6 +30,7 @@ import { DesviacionTipo, Product, StagedItem, UsuarioCuenta, ZonalInfo } from '.
 import { CIAL_ZONALES } from '../data/zonales';
 import { getTodayChile, getISOWeekNumber, getChileTimeString, getZonalLote } from '../utils/date';
 import { searchClients, getClientNameByCode, searchTransports } from '../data/clients';
+import { getProductPackagingInfo } from '../utils/productUtils';
 
 interface QuickEntryFormProps {
   products: Product[];
@@ -127,12 +128,13 @@ export const QuickEntryForm: React.FC<QuickEntryFormProps> = ({
     }
   }, [folioRefCamion]);
 
-  // Auto-calcular Kilos cuando cambia producto o cantidad
+  // Auto-calcular Kilos cuando cambia producto o cantidad (considerando peso de caja si UMV es CJ)
   useEffect(() => {
     if (selectedProduct) {
-      const unitWeight = selectedProduct.neto > 0 ? selectedProduct.neto : selectedProduct.bruto;
-      if (unitWeight > 0) {
-        setKilos(Number((unitWeight * cantidad).toFixed(3)));
+      const info = getProductPackagingInfo(selectedProduct);
+      const effectiveWeight = info.pesoCaja > 0 ? info.pesoCaja : (selectedProduct.bruto || selectedProduct.neto || 1);
+      if (effectiveWeight > 0) {
+        setKilos(Number((effectiveWeight * cantidad).toFixed(3)));
       }
     }
   }, [selectedProduct, cantidad]);
@@ -784,11 +786,21 @@ export const QuickEntryForm: React.FC<QuickEntryFormProps> = ({
                       </span>
                       <span className="font-bold text-xs text-slate-800">{p.descripcion}</span>
                     </div>
-                    <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500">
-                      <span>UMV: <strong className="text-slate-700">{p.um_venta || p.unidad}</strong></span>
-                      <span>Neto: <strong>{p.neto} kg</strong></span>
-                      <span className="text-slate-400">({p.tipo_peso})</span>
-                    </div>
+                    {(() => {
+                      const info = getProductPackagingInfo(p);
+                      return (
+                        <div className="flex items-center gap-3 mt-1 text-[11px] text-slate-500">
+                          <span>UMV: <strong className="text-slate-700">{info.um}</strong></span>
+                          {info.esCaja && (
+                            <span className="bg-emerald-50 text-emerald-800 font-bold px-1.5 py-0.2 rounded border border-emerald-200">
+                              {info.unidadesPorCajaText} / CJ
+                            </span>
+                          )}
+                          <span>Peso: <strong>{info.pesoCaja} kg{info.esCaja ? '/caja' : ''}</strong></span>
+                          <span className="text-slate-400">({p.tipo_peso})</span>
+                        </div>
+                      );
+                    })()}
                   </div>
                   {p.estado === 'Bloqueado' && (
                     <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">
@@ -839,8 +851,10 @@ export const QuickEntryForm: React.FC<QuickEntryFormProps> = ({
           <div>
             <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
               <span>Kilos</span>
-              {selectedProduct && selectedProduct.neto > 0 && (
-                <span className="text-[10px] text-emerald-600 font-semibold">Sugerido</span>
+              {selectedProduct && (
+                <span className="text-[10px] text-emerald-700 font-semibold">
+                  Sugerido ({getProductPackagingInfo(selectedProduct).pesoCaja} kg/{(selectedProduct.um_venta || selectedProduct.unidad || 'UN')})
+                </span>
               )}
             </label>
             <input
