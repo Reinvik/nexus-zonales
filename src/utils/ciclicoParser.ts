@@ -298,7 +298,7 @@ export function consolidarInventario(
   almacen999Rows: any[],
   sdifRows: any[],
   productsList: Product[] = [],
-  supervisorOverrides?: Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string }>
+  supervisorOverrides?: Record<string, { cant_contada: number; cant_sistema?: number; diferencia?: number; notas?: string; supervisor_nombre?: string; fecha_revision?: string }>
 ): {
   items: InventarioItemConsolidado[];
   totales: {
@@ -425,21 +425,31 @@ export function consolidarInventario(
       };
     });
 
-    // Si existe reconteo del supervisor para este SKU, se aplica como conteo efectivo
+    // Si existe reconteo/auditoría del supervisor para este SKU, se aplica como conteo efectivo
+    // El supervisor puede editar tanto el físico (contado), como el sistémico (sistema SAP) y la diferencia directa
     const revSupervisor = supervisorOverrides?.[sku];
+    let cantSistemaFinal = totalSistemaSku;
     let cantContadaFinal = totalContadoSku;
     let difeFinal = totalDifeSku;
-    let difeUnidadesFinal = totalDifeSku * factorEmpaque;
-    let difPrecioFinal = totalDifPrecioSku;
     let revisadoSupervisor = false;
 
     if (revSupervisor !== undefined) {
-      cantContadaFinal = revSupervisor.cant_contada;
-      difeFinal = cantContadaFinal - totalSistemaSku;
-      difeUnidadesFinal = difeFinal * factorEmpaque;
-      difPrecioFinal = difeUnidadesFinal * precio;
       revisadoSupervisor = true;
+      if (revSupervisor.cant_sistema !== undefined) {
+        cantSistemaFinal = revSupervisor.cant_sistema;
+      }
+      if (revSupervisor.cant_contada !== undefined) {
+        cantContadaFinal = revSupervisor.cant_contada;
+      }
+      if (revSupervisor.diferencia !== undefined) {
+        difeFinal = revSupervisor.diferencia;
+      } else {
+        difeFinal = cantContadaFinal - cantSistemaFinal;
+      }
     }
+
+    const difeUnidadesFinal = difeFinal * factorEmpaque;
+    const difPrecioFinal = difeUnidadesFinal * precio;
 
     // Determinar Estado (En Picking el lote no importa: si la diferencia total es 0, el SKU está cuadrado)
     let estado: EstadoDiferencia = 'cuadrado';
@@ -459,7 +469,7 @@ export function consolidarInventario(
       }
     }
 
-    sumSistema += totalSistemaSku;
+    sumSistema += cantSistemaFinal;
     sumContado += cantContadaFinal;
     sumDiferencia += difeFinal;
     sumDifPrecio += difPrecioFinal;
@@ -616,12 +626,15 @@ export function consolidarInventario(
       conciliacion_sdif: conciliacionSdif,
       revisado_supervisor: revisadoSupervisor,
       revision_supervisor: revisadoSupervisor ? {
+        cant_sistema_original: totalSistemaSku,
         cant_contada_original: totalContadoSku,
         diferencia_original: totalDifeSku,
+        cant_sistema_supervisor: cantSistemaFinal,
         cant_contada_supervisor: cantContadaFinal,
         diferencia_supervisor: difeFinal,
         notas: revSupervisor?.notas,
-        supervisor_nombre: revSupervisor?.supervisor_nombre
+        supervisor_nombre: revSupervisor?.supervisor_nombre,
+        fecha_revision: revSupervisor?.fecha_revision
       } : undefined
     });
   }

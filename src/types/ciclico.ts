@@ -81,8 +81,10 @@ export type EstadoDiferencia =
   | 'cuadrado';       // todo en 0
 
 export interface SupervisorRevision {
+  cant_sistema_original?: number;
   cant_contada_original: number;
   diferencia_original: number;
+  cant_sistema_supervisor?: number;
   cant_contada_supervisor: number;
   diferencia_supervisor: number;
   notas?: string;

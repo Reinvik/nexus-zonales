@@ -181,17 +181,31 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
   const [parseErrorsMb52, setParseErrorsMb52] = useState<string[]>([]);
 
   // Estados para la Revisión / Auditoría y Ajuste de Diferencias
-  const [supervisorRevisions, setSupervisorRevisions] = useState<Record<string, { cant_contada: number; notas?: string; supervisor_nombre?: string; fecha_revision?: string }>>(() => {
+  const [supervisorRevisions, setSupervisorRevisions] = useState<Record<string, { 
+    cant_contada: number; 
+    cant_sistema?: number; 
+    diferencia?: number; 
+    notas?: string; 
+    supervisor_nombre?: string; 
+    fecha_revision?: string;
+  }>>(() => {
     const cached = localStorage.getItem('nexus_supervisor_revisions');
     return cached ? JSON.parse(cached) : {};
   });
   const [isTabletReviewOpen, setIsTabletReviewOpen] = useState<boolean>(false);
   const [topNCount, setTopNCount] = useState<number>(10);
-  const [draftRevisions, setDraftRevisions] = useState<Record<string, { cant_contada: number; notas?: string }>>({});
+  const [draftRevisions, setDraftRevisions] = useState<Record<string, { 
+    cant_contada: number; 
+    cant_sistema: number; 
+    diferencia: number; 
+    notas?: string; 
+  }>>({});
 
-  // Estados para Modal de Ajuste Individual por SKU
+  // Estados para Modal de Ajuste Individual por SKU (Físico, Sistémico y Diferencia)
   const [adjustingItem, setAdjustingItem] = useState<InventarioItemConsolidado | null>(null);
+  const [adjustCantSistema, setAdjustCantSistema] = useState<number>(0);
   const [adjustCantContada, setAdjustCantContada] = useState<number>(0);
+  const [adjustDiferencia, setAdjustDiferencia] = useState<number>(0);
   const [adjustNotas, setAdjustNotas] = useState<string>('');
   const [isSavingAdjustment, setIsSavingAdjustment] = useState<boolean>(false);
 
@@ -530,13 +544,24 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
   // Abrir Modal Tablet con borrador inicial
   const handleOpenTabletReview = () => {
-    const initialDrafts: Record<string, { cant_contada: number; notas?: string }> = {};
+    const initialDrafts: Record<string, { cant_contada: number; cant_sistema: number; diferencia: number; notas?: string }> = {};
     topItemsForReview.forEach(item => {
-      if (supervisorRevisions[item.sku]) {
-        initialDrafts[item.sku] = { ...supervisorRevisions[item.sku] };
+      const rev = supervisorRevisions[item.sku];
+      if (rev) {
+        const sist = rev.cant_sistema !== undefined ? rev.cant_sistema : item.cant_sistema;
+        const cont = rev.cant_contada !== undefined ? rev.cant_contada : item.cant_contada;
+        const dif = rev.diferencia !== undefined ? rev.diferencia : (cont - sist);
+        initialDrafts[item.sku] = {
+          cant_contada: cont,
+          cant_sistema: sist,
+          diferencia: dif,
+          notas: rev.notas || ''
+        };
       } else {
         initialDrafts[item.sku] = {
           cant_contada: item.cant_contada,
+          cant_sistema: item.cant_sistema,
+          diferencia: item.diferencia,
           notas: ''
         };
       }
@@ -545,23 +570,82 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     setIsTabletReviewOpen(true);
   };
 
-  // Modificar valor en el borrador de la tablet
-  const handleDraftChange = (sku: string, newCount: number, notes?: string) => {
-    setDraftRevisions(prev => ({
-      ...prev,
-      [sku]: {
-        cant_contada: Math.max(0, newCount),
-        notas: notes !== undefined ? notes : prev[sku]?.notas || ''
+  // Modificar Físico, Sistémico o Diferencia en el borrador de la tablet
+  const handleDraftFieldChange = (
+    sku: string, 
+    field: 'cant_contada' | 'cant_sistema' | 'diferencia', 
+    val: number, 
+    notes?: string
+  ) => {
+    setDraftRevisions(prev => {
+      const item = itemsConsolidados.find(i => i.sku === sku);
+      const current = prev[sku] ?? {
+        cant_contada: supervisorRevisions[sku]?.cant_contada ?? item?.cant_contada ?? 0,
+        cant_sistema: supervisorRevisions[sku]?.cant_sistema ?? item?.cant_sistema ?? 0,
+        diferencia: supervisorRevisions[sku]?.diferencia ?? item?.diferencia ?? 0,
+        notas: supervisorRevisions[sku]?.notas ?? ''
+      };
+
+      let newFisico = current.cant_contada;
+      let newSistemico = current.cant_sistema;
+      let newDiferencia = current.diferencia;
+
+      if (field === 'cant_contada') {
+        newFisico = isNaN(val) ? 0 : Math.max(0, val);
+        newDiferencia = newFisico - newSistemico;
+      } else if (field === 'cant_sistema') {
+        newSistemico = isNaN(val) ? 0 : Math.max(0, val);
+        newDiferencia = newFisico - newSistemico;
+      } else if (field === 'diferencia') {
+        newDiferencia = isNaN(val) ? 0 : val;
+        newFisico = Math.max(0, newSistemico + newDiferencia);
       }
-    }));
+
+      return {
+        ...prev,
+        [sku]: {
+          cant_contada: newFisico,
+          cant_sistema: newSistemico,
+          diferencia: newDiferencia,
+          notas: notes !== undefined ? notes : current.notas || ''
+        }
+      };
+    });
   };
 
-  // Abrir Modal de Ajuste para un SKU específico
+  // Abrir Modal de Ajuste para un SKU específico (Físico, Sistémico y Diferencia)
   const handleOpenAdjustModal = (item: InventarioItemConsolidado) => {
     setAdjustingItem(item);
     const existingRev = supervisorRevisions[item.sku];
-    setAdjustCantContada(existingRev !== undefined ? existingRev.cant_contada : item.cant_contada);
+    const sist = existingRev?.cant_sistema !== undefined ? existingRev.cant_sistema : item.cant_sistema;
+    const cont = existingRev?.cant_contada !== undefined ? existingRev.cant_contada : item.cant_contada;
+    const dif = existingRev?.diferencia !== undefined ? existingRev.diferencia : (cont - sist);
+
+    setAdjustCantSistema(sist);
+    setAdjustCantContada(cont);
+    setAdjustDiferencia(dif);
     setAdjustNotas(existingRev?.notas || '');
+  };
+
+  // Modificar Físico en Modal Individual (recalcula Diferencia)
+  const handleAdjustFisicoChange = (val: number) => {
+    const safeVal = isNaN(val) ? 0 : Math.max(0, val);
+    setAdjustCantContada(safeVal);
+    setAdjustDiferencia(safeVal - adjustCantSistema);
+  };
+
+  // Modificar Sistémico en Modal Individual (recalcula Diferencia)
+  const handleAdjustSistemaChange = (val: number) => {
+    const safeVal = isNaN(val) ? 0 : Math.max(0, val);
+    setAdjustCantSistema(safeVal);
+    setAdjustDiferencia(adjustCantContada - safeVal);
+  };
+
+  // Modificar Diferencia en Modal Individual (recalcula Físico)
+  const handleAdjustDiferenciaChange = (val: number) => {
+    const safeVal = isNaN(val) ? 0 : val;
+    setAdjustDiferencia(safeVal);
+    setAdjustCantContada(Math.max(0, adjustCantSistema + safeVal));
   };
 
   // Guardar Ajuste Individual de SKU en la Nube
@@ -573,6 +657,8 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       ...supervisorRevisions,
       [adjustingItem.sku]: {
         cant_contada: Number(adjustCantContada),
+        cant_sistema: Number(adjustCantSistema),
+        diferencia: Number(adjustDiferencia),
         notas: adjustNotas.trim(),
         supervisor_nombre: currentUser?.nombre || 'Supervisor CD',
         fecha_revision: new Date().toLocaleTimeString('es-CL')
@@ -630,6 +716,8 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     Object.entries(draftRevisions).forEach(([sku, rev]) => {
       newRevisions[sku] = {
         cant_contada: Number(rev.cant_contada),
+        cant_sistema: Number(rev.cant_sistema),
+        diferencia: Number(rev.diferencia),
         notas: rev.notas?.trim(),
         supervisor_nombre: currentUser?.nombre || 'Supervisor CD',
         fecha_revision: new Date().toLocaleTimeString('es-CL')
@@ -1507,7 +1595,16 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
 
                             {/* Cant Sistema */}
                             <td className="p-3 text-right font-mono font-bold text-slate-700 whitespace-nowrap">
-                              {item.cant_sistema} {item.factor_empaque === 1 ? 'UN' : 'CJ'}
+                              <div className="flex flex-col items-end">
+                                <span>{item.cant_sistema} {item.factor_empaque === 1 ? 'UN' : 'CJ'}</span>
+                                {item.revision_supervisor?.cant_sistema_supervisor !== undefined && 
+                                 item.revision_supervisor.cant_sistema_original !== undefined &&
+                                 item.revision_supervisor.cant_sistema_supervisor !== item.revision_supervisor.cant_sistema_original && (
+                                  <span className="text-[9px] text-indigo-700 font-semibold" title={`Modificado por supervisor. Valor original SAP: ${item.revision_supervisor.cant_sistema_original}`}>
+                                    SAP: {item.revision_supervisor.cant_sistema_original}
+                                  </span>
+                                )}
+                              </div>
                             </td>
 
                             {/* Cant Contada */}
@@ -1639,8 +1736,9 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                                           </span>
                                         </div>
                                         <p className="text-[11px] text-amber-900 mt-0.5">
-                                          1er Conteo Operador: <strong>{item.revision_supervisor.cant_contada_original} CJ</strong> (Dif: {item.revision_supervisor.diferencia_original} CJ) ➔ 
-                                          Reconteo Físico Supervisor: <strong>{item.revision_supervisor.cant_contada_supervisor} CJ</strong> (Dif Real: <strong>{item.revision_supervisor.diferencia_supervisor > 0 ? `+${item.revision_supervisor.diferencia_supervisor}` : item.revision_supervisor.diferencia_supervisor} CJ</strong>).
+                                          Sistémico: <strong>{item.cant_sistema} CJ</strong> {item.revision_supervisor.cant_sistema_original !== undefined && item.revision_supervisor.cant_sistema_original !== item.cant_sistema ? `(SAP Orig: ${item.revision_supervisor.cant_sistema_original} CJ)` : ''} • 
+                                          Físico: <strong>{item.cant_contada} CJ</strong> {item.revision_supervisor.cant_contada_original !== item.cant_contada ? `(1er Conteo: ${item.revision_supervisor.cant_contada_original} CJ)` : ''} • 
+                                          Diferencia: <strong>{item.diferencia > 0 ? `+${item.diferencia}` : item.diferencia} CJ</strong> (Orig: {item.revision_supervisor.diferencia_original} CJ).
                                         </p>
                                         {item.revision_supervisor.notas && (
                                           <p className="text-[11px] text-amber-950 font-medium italic mt-1 bg-amber-100/70 border border-amber-200/60 px-2.5 py-1 rounded-md">
@@ -2190,15 +2288,27 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                 </div>
               ) : (
                 topItemsForReview.map((item, index) => {
+                  const rev = supervisorRevisions[item.sku];
+                  const origSist = item.revision_supervisor?.cant_sistema_original ?? item.cant_sistema;
+                  const origCont = item.revision_supervisor?.cant_contada_original ?? item.cant_contada;
+                  const origDife = item.revision_supervisor?.diferencia_original ?? item.diferencia;
+
                   const draft = draftRevisions[item.sku] ?? {
-                    cant_contada: supervisorRevisions[item.sku]?.cant_contada ?? item.cant_contada,
-                    notas: supervisorRevisions[item.sku]?.notas ?? ''
+                    cant_contada: rev?.cant_contada ?? item.cant_contada,
+                    cant_sistema: rev?.cant_sistema ?? item.cant_sistema,
+                    diferencia: rev?.diferencia ?? item.diferencia,
+                    notas: rev?.notas ?? ''
                   };
-                  const currentCount = draft.cant_contada;
-                  const originalCount = item.revision_supervisor?.cant_contada_original ?? item.cant_contada;
-                  const draftDife = currentCount - item.cant_sistema;
-                  const draftDifePrecio = draftDife * item.precio_unitario;
-                  const isModified = currentCount !== originalCount;
+
+                  const currentFisico = draft.cant_contada;
+                  const currentSistemico = draft.cant_sistema;
+                  const currentDife = draft.diferencia;
+                  const currentDifePrecio = currentDife * item.factor_empaque * item.precio_unitario;
+
+                  const isModified = 
+                    currentFisico !== origCont || 
+                    currentSistemico !== origSist ||
+                    currentDife !== origDife;
 
                   return (
                     <div 
@@ -2244,129 +2354,210 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                         </span>
                       </div>
 
-                      {/* Grilla Comparativa Táctil */}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-2">
-                        {/* 1. Cantidad Sistema SAP */}
-                        <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-700/60 text-center flex flex-col justify-between">
-                          <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">
-                            1. Sistema SAP
-                          </span>
-                          <div className="text-2xl font-black font-mono text-slate-200 my-1">
-                            {item.cant_sistema}
-                          </div>
-                          <span className="text-[10px] text-slate-400">Cajas teóricas</span>
-                        </div>
-
-                        {/* 2. Primer Conteo Operador */}
-                        <div className="bg-slate-900/80 p-3 rounded-xl border border-slate-700/60 text-center flex flex-col justify-between">
-                          <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">
-                            2. 1er Conteo Operador
-                          </span>
-                          <div className="text-2xl font-black font-mono text-slate-300 my-1">
-                            {originalCount}
-                          </div>
-                          <span className={`text-[10px] font-mono font-bold ${
-                            originalCount - item.cant_sistema < 0 ? 'text-rose-400' : (originalCount - item.cant_sistema > 0 ? 'text-blue-400' : 'text-emerald-400')
-                          }`}>
-                            Dif: {originalCount - item.cant_sistema > 0 ? `+${originalCount - item.cant_sistema}` : originalCount - item.cant_sistema} CJ
-                          </span>
-                        </div>
-
-                        {/* 3. Reconteo Físico Supervisor (Stepper Táctil) */}
-                        <div className="bg-slate-900/95 p-3 rounded-xl border-2 border-indigo-500/80 col-span-2 md:col-span-1 shadow-inner flex flex-col justify-between">
+                      {/* Grilla Comparativa Táctil: Sistémico, Físico, Diferencia e Impacto Financiero */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+                        {/* 1. Sistémico SAP (Editable) */}
+                        <div className="bg-slate-900/95 p-3 rounded-xl border border-slate-700/80 flex flex-col justify-between">
                           <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider block text-center">
-                            3. Reconteo Físico Supervisor
+                            1. Sistémico (CJ)
                           </span>
                           
-                          <div className="flex items-center justify-center gap-2 my-1.5">
+                          <div className="flex items-center justify-center gap-1.5 my-1.5">
                             <button
                               type="button"
-                              onClick={() => handleDraftChange(item.sku, Math.max(0, currentCount - 1), draft.notas)}
-                              className="w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-black text-lg border border-slate-600 transition-all cursor-pointer"
-                              title="Restar 1 caja"
+                              onClick={() => handleDraftFieldChange(item.sku, 'cant_sistema', Math.max(0, currentSistemico - 1), draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Restar 1 caja al sistémico"
                             >
-                              <Minus className="w-5 h-5" />
+                              <Minus className="w-4 h-4" />
                             </button>
                             
                             <input
                               type="number"
                               min="0"
-                              value={isNaN(currentCount) ? '' : currentCount}
+                              value={isNaN(currentSistemico) ? '' : currentSistemico}
                               onChange={e => {
                                 const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
-                                handleDraftChange(item.sku, isNaN(val) ? 0 : val, draft.notas);
+                                handleDraftFieldChange(item.sku, 'cant_sistema', isNaN(val) ? 0 : val, draft.notas);
                               }}
-                              className="w-20 h-10 text-center bg-slate-950 border border-indigo-500/60 rounded-xl font-mono text-xl font-black text-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                              className="w-16 h-8 text-center bg-slate-950 border border-slate-600 rounded-lg font-mono text-base font-black text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-400"
                             />
 
                             <button
                               type="button"
-                              onClick={() => handleDraftChange(item.sku, currentCount + 1, draft.notas)}
-                              className="w-10 h-10 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-black text-lg border border-slate-600 transition-all cursor-pointer"
-                              title="Sumar 1 caja"
+                              onClick={() => handleDraftFieldChange(item.sku, 'cant_sistema', currentSistemico + 1, draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Sumar 1 caja al sistémico"
                             >
-                              <Plus className="w-5 h-5" />
+                              <Plus className="w-4 h-4" />
                             </button>
                           </div>
 
-                          {/* Botones de Acción Rápida */}
+                          <div className="flex items-center justify-center gap-1 text-[10px]">
+                            {currentSistemico !== origSist ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDraftFieldChange(item.sku, 'cant_sistema', origSist, draft.notas)}
+                                className="text-amber-400 hover:underline cursor-pointer font-bold"
+                                title="Volver al sistémico original de SAP"
+                              >
+                                ↩ Orig SAP ({origSist})
+                              </button>
+                            ) : (
+                              <span className="text-slate-400">Teórico SAP: {origSist}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 2. Reconteo Físico Supervisor (Editable) */}
+                        <div className="bg-slate-900/95 p-3 rounded-xl border-2 border-indigo-500/80 shadow-inner flex flex-col justify-between">
+                          <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider block text-center">
+                            2. Físico / Conteo (CJ)
+                          </span>
+                          
+                          <div className="flex items-center justify-center gap-1.5 my-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDraftFieldChange(item.sku, 'cant_contada', Math.max(0, currentFisico - 1), draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Restar 1 caja al conteo físico"
+                            >
+                              <Minus className="w-4 h-4" />
+                            </button>
+                            
+                            <input
+                              type="number"
+                              min="0"
+                              value={isNaN(currentFisico) ? '' : currentFisico}
+                              onChange={e => {
+                                const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+                                handleDraftFieldChange(item.sku, 'cant_contada', isNaN(val) ? 0 : val, draft.notas);
+                              }}
+                              className="w-16 h-8 text-center bg-slate-950 border border-indigo-500/60 rounded-lg font-mono text-base font-black text-white focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                            />
+
+                            <button
+                              type="button"
+                              onClick={() => handleDraftFieldChange(item.sku, 'cant_contada', currentFisico + 1, draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Sumar 1 caja al conteo físico"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                          </div>
+
                           <div className="flex items-center justify-center gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleDraftChange(item.sku, item.cant_sistema, draft.notas)}
-                              className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-lg text-[10px] font-bold transition-all cursor-pointer"
-                              title="Ajustar a la cantidad teórica del sistema (Cuadrar)"
+                              onClick={() => handleDraftFieldChange(item.sku, 'cant_contada', currentSistemico, draft.notas)}
+                              className="px-2 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded text-[10px] font-bold transition-all cursor-pointer"
+                              title="Cuadrar conteo físico con sistémico"
                             >
-                              ✓ Cuadrar ({item.cant_sistema})
+                              ✓ Cuadrar ({currentSistemico})
                             </button>
-                            {isModified && (
+                            {currentFisico !== origCont && (
                               <button
                                 type="button"
-                                onClick={() => handleDraftChange(item.sku, originalCount, draft.notas)}
-                                className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 rounded-lg text-[10px] font-bold transition-all cursor-pointer"
-                                title="Volver al primer conteo reportado por el operador"
+                                onClick={() => handleDraftFieldChange(item.sku, 'cant_contada', origCont, draft.notas)}
+                                className="px-1.5 py-0.5 text-slate-400 hover:text-white text-[10px] underline cursor-pointer"
+                                title="Volver al 1er conteo del operador"
                               >
-                                ↩ 1er Conteo ({originalCount})
+                                1er Cte: {origCont}
                               </button>
                             )}
                           </div>
                         </div>
 
-                        {/* 4. Diferencia Real Resultante */}
+                        {/* 3. Diferencia Directa (Editable) */}
+                        <div className="bg-slate-900/95 p-3 rounded-xl border border-slate-700/80 flex flex-col justify-between">
+                          <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider block text-center">
+                            3. Diferencia (CJ)
+                          </span>
+                          
+                          <div className="flex items-center justify-center gap-1.5 my-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDraftFieldChange(item.sku, 'diferencia', currentDife - 1, draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Disminuir diferencia"
+                            >
+                              <Minus className="w-4 h-4" />
+                            </button>
+                            
+                            <input
+                              type="number"
+                              value={isNaN(currentDife) ? '' : currentDife}
+                              onChange={e => {
+                                const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+                                handleDraftFieldChange(item.sku, 'diferencia', isNaN(val) ? 0 : val, draft.notas);
+                              }}
+                              className={`w-16 h-8 text-center bg-slate-950 border rounded-lg font-mono text-base font-black focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                                currentDife < 0 ? 'border-rose-500/70 text-rose-300' : (currentDife > 0 ? 'border-blue-500/70 text-blue-300' : 'border-emerald-500/70 text-emerald-300')
+                              }`}
+                            />
+
+                            <button
+                              type="button"
+                              onClick={() => handleDraftFieldChange(item.sku, 'diferencia', currentDife + 1, draft.notas)}
+                              className="w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-90 text-white flex items-center justify-center font-bold border border-slate-600 transition-all cursor-pointer"
+                              title="Aumentar diferencia"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDraftFieldChange(item.sku, 'diferencia', 0, draft.notas)}
+                              className="px-2 py-0.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded text-[10px] font-bold transition-all cursor-pointer"
+                              title="Fijar diferencia en 0"
+                            >
+                              🎯 Dif = 0
+                            </button>
+                            {currentDife !== origDife && (
+                              <span className="text-[10px] text-slate-400">Orig: {origDife}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 4. Impacto Financiero & Estado */}
                         <div className={`p-3 rounded-xl border text-center flex flex-col justify-between ${
-                          draftDife === 0 
+                          currentDife === 0 
                             ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
-                            : draftDife < 0 
+                            : currentDife < 0 
                               ? 'bg-rose-950/40 border-rose-500/50 text-rose-300'
                               : 'bg-blue-950/40 border-blue-500/50 text-blue-300'
                         }`}>
                           <div>
                             <span className="text-[10px] font-black uppercase tracking-wider block">
-                              4. Diferencia Real
+                              4. Impacto en Dinero
                             </span>
-                            <div className="text-2xl font-black font-mono my-1">
-                              {draftDife > 0 ? `+${draftDife}` : draftDife} CJ
+                            <div className="text-xl font-black font-mono my-1">
+                              {currentDifePrecio < 0 
+                                ? `- $${Math.abs(currentDifePrecio).toLocaleString('es-CL')}` 
+                                : (currentDifePrecio > 0 ? `+ $${currentDifePrecio.toLocaleString('es-CL')}` : '$0')}
                             </div>
-                            <div className="text-xs font-mono font-bold">
-                              {draftDifePrecio < 0 
-                                ? `- $${Math.abs(draftDifePrecio).toLocaleString('es-CL')}` 
-                                : (draftDifePrecio > 0 ? `+ $${draftDifePrecio.toLocaleString('es-CL')}` : '$0')}
-                            </div>
+                            {item.factor_empaque > 1 && currentDife !== 0 && (
+                              <div className="text-[10px] font-mono text-slate-400">
+                                {currentDife * item.factor_empaque > 0 ? `+${currentDife * item.factor_empaque}` : currentDife * item.factor_empaque} UN
+                              </div>
+                            )}
                           </div>
-                          <div className="mt-2">
-                            {draftDife === 0 && (
+                          <div className="mt-1.5">
+                            {currentDife === 0 && (
                               <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-emerald-500/30 text-emerald-300 border border-emerald-500/40">
                                 100% Cuadrado
                               </span>
                             )}
-                            {draftDife < 0 && (
+                            {currentDife < 0 && (
                               <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-rose-500/30 text-rose-300 border border-rose-500/40">
                                 Faltante Real
                               </span>
                             )}
-                            {draftDife > 0 && (
+                            {currentDife > 0 && (
                               <span className="px-2 py-0.5 rounded-full text-[9px] font-black bg-blue-500/30 text-blue-300 border border-blue-500/40" title="Habilita conciliación con Almacén 999 y luego SDIF">
-                                Sobrante Real ➔ Cruce
+                                Sobrante ➔ Cruce
                               </span>
                             )}
                           </div>
@@ -2380,7 +2571,7 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                           type="text"
                           placeholder="Notas de terreno (ej: pallet mal rotulado, producto en doble fondo, lote cruzado con 008...)"
                           value={draft.notas || ''}
-                          onChange={e => handleDraftChange(item.sku, currentCount, e.target.value)}
+                          onChange={e => handleDraftFieldChange(item.sku, 'cant_contada', currentFisico, e.target.value)}
                           className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
                         />
                       </div>
@@ -2403,8 +2594,10 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                   <span className="font-mono font-black text-indigo-400 text-sm">
                     {Object.keys(draftRevisions).filter(sku => {
                       const item = itemsConsolidados.find(i => i.sku === sku);
-                      const orig = item?.revision_supervisor?.cant_contada_original ?? item?.cant_contada;
-                      return draftRevisions[sku]?.cant_contada !== orig;
+                      const origCont = item?.revision_supervisor?.cant_contada_original ?? item?.cant_contada;
+                      const origSist = item?.revision_supervisor?.cant_sistema_original ?? item?.cant_sistema;
+                      const draft = draftRevisions[sku];
+                      return draft && (draft.cant_contada !== origCont || draft.cant_sistema !== origSist);
                     }).length} SKUs ajustados
                   </span>
                 </div>
@@ -2483,82 +2676,118 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                 </span>
               </div>
 
-              {/* Grilla Comparativa de Cantidades */}
+              {/* Grilla Comparativa de Cantidades: Sistémico, Físico y Diferencia */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {/* 1. Sistema SAP */}
+                {/* 1. Sistema SAP (Editable) */}
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center flex flex-col justify-between">
                   <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
                     1. Sistema SAP
                   </span>
-                  <div className="text-2xl font-black font-mono text-slate-800 my-1">
-                    {adjustingItem.cant_sistema}
-                  </div>
-                  <span className="text-[10px] text-slate-400">
-                    {adjustingItem.factor_empaque === 1 ? 'Unidades' : 'Cajas teóricas'}
-                  </span>
-                </div>
-
-                {/* 2. Conteo Original */}
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center flex flex-col justify-between">
-                  <span className="text-[10px] font-black uppercase text-slate-500 tracking-wider">
-                    2. 1er Conteo Operador
-                  </span>
-                  <div className="text-2xl font-black font-mono text-slate-700 my-1">
-                    {adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada}
-                  </div>
-                  {(() => {
-                    const origCount = adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada;
-                    const origDif = origCount - adjustingItem.cant_sistema;
-                    return (
-                      <span className={`text-[10px] font-mono font-bold ${
-                        origDif < 0 ? 'text-rose-600' : (origDif > 0 ? 'text-blue-600' : 'text-emerald-600')
-                      }`}>
-                        Dif orig: {origDif > 0 ? `+${origDif}` : origDif} CJ
-                      </span>
-                    );
-                  })()}
-                </div>
-
-                {/* 3. Cantidad Ajustada (Stepper) */}
-                <div className="p-3 bg-indigo-50/70 border-2 border-indigo-400 rounded-xl text-center flex flex-col justify-between">
-                  <span className="text-[10px] font-black uppercase text-indigo-950 tracking-wider">
-                    3. Conteo Físico Ajustado
-                  </span>
-                  <div className="flex items-center justify-center gap-1.5 my-1">
+                  <div className="flex items-center justify-center gap-1.5 my-1.5">
                     <button
                       type="button"
-                      onClick={() => setAdjustCantContada(prev => Math.max(0, prev - 1))}
-                      className="w-8 h-8 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      onClick={() => handleAdjustSistemaChange(Math.max(0, adjustCantSistema - 1))}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Restar 1 caja sistémica"
                     >
-                      <Minus className="w-4 h-4" />
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      min="0"
+                      value={isNaN(adjustCantSistema) ? '' : adjustCantSistema}
+                      onChange={e => handleAdjustSistemaChange(parseInt(e.target.value, 10))}
+                      className="w-16 h-8 text-center bg-white border border-slate-300 rounded-lg font-mono text-base font-black text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAdjustSistemaChange(adjustCantSistema + 1)}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Sumar 1 caja sistémica"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <span className="text-[10px] text-slate-400">
+                    Orig SAP: {adjustingItem.revision_supervisor?.cant_sistema_original ?? adjustingItem.cant_sistema}
+                  </span>
+                </div>
+
+                {/* 2. Conteo Físico (Editable) */}
+                <div className="p-3 bg-indigo-50/70 border-2 border-indigo-400 rounded-xl text-center flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-indigo-950 tracking-wider">
+                    2. Conteo Físico
+                  </span>
+                  <div className="flex items-center justify-center gap-1.5 my-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleAdjustFisicoChange(Math.max(0, adjustCantContada - 1))}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Restar 1 caja al conteo físico"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
                     </button>
                     <input
                       type="number"
                       min="0"
                       value={isNaN(adjustCantContada) ? '' : adjustCantContada}
-                      onChange={e => {
-                        const val = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
-                        setAdjustCantContada(isNaN(val) ? 0 : val);
-                      }}
+                      onChange={e => handleAdjustFisicoChange(parseInt(e.target.value, 10))}
                       className="w-16 h-8 text-center bg-white border border-indigo-300 rounded-lg font-mono text-base font-black text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                     <button
                       type="button"
-                      onClick={() => setAdjustCantContada(prev => prev + 1)}
-                      className="w-8 h-8 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      onClick={() => handleAdjustFisicoChange(adjustCantContada + 1)}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Sumar 1 caja al conteo físico"
                     >
-                      <Plus className="w-4 h-4" />
+                      <Plus className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                  <span className="text-[10px] font-bold text-indigo-900">
-                    {adjustingItem.factor_empaque === 1 ? 'Unidades físicas' : 'Cajas físicas'}
+                  <span className="text-[10px] text-indigo-900 font-semibold">
+                    1er Conteo: {adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada}
+                  </span>
+                </div>
+
+                {/* 3. Diferencia Resultante (Editable) */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-center flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                    3. Diferencia (CJ)
+                  </span>
+                  <div className="flex items-center justify-center gap-1.5 my-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleAdjustDiferenciaChange(adjustDiferencia - 1)}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Restar 1 caja a diferencia"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="number"
+                      value={isNaN(adjustDiferencia) ? '' : adjustDiferencia}
+                      onChange={e => handleAdjustDiferenciaChange(parseInt(e.target.value, 10))}
+                      className={`w-16 h-8 text-center bg-white border rounded-lg font-mono text-base font-black focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
+                        adjustDiferencia < 0 ? 'text-rose-600 border-rose-300' : (adjustDiferencia > 0 ? 'text-blue-600 border-blue-300' : 'text-emerald-600 border-emerald-300')
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAdjustDiferenciaChange(adjustDiferencia + 1)}
+                      className="w-7 h-7 rounded-lg bg-white hover:bg-slate-100 active:scale-90 text-slate-800 flex items-center justify-center font-black border border-slate-300 transition-all cursor-pointer shadow-2xs"
+                      title="Sumar 1 caja a diferencia"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-500 font-bold">
+                    {adjustDiferencia > 0 ? `+${adjustDiferencia}` : adjustDiferencia} CJ
                   </span>
                 </div>
               </div>
 
               {/* Resultado del Ajuste en Tiempo Real */}
               {(() => {
-                const newDife = adjustCantContada - adjustingItem.cant_sistema;
+                const newDife = adjustDiferencia;
                 const newDifPrecio = newDife * adjustingItem.factor_empaque * adjustingItem.precio_unitario;
                 return (
                   <div className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs ${
@@ -2569,7 +2798,7 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                         : 'bg-blue-50 border-blue-300 text-blue-900'
                   }`}>
                     <div className="flex items-center gap-2">
-                      <span className="font-bold">Diferencia Resultante:</span>
+                      <span className="font-bold">Impacto Diferencia:</span>
                       <span className="font-mono font-black text-sm">
                         {newDife > 0 ? `+${newDife}` : newDife} CJ
                       </span>
@@ -2597,25 +2826,37 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setAdjustCantContada(adjustingItem.cant_sistema);
+                      handleAdjustFisicoChange(adjustCantSistema);
                       if (!adjustNotas) setAdjustNotas('Diferencia regularizada a 0 tras reconteo.');
                     }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#008744] border border-emerald-300 rounded-lg text-xs font-bold transition-all cursor-pointer"
                   >
                     <Check className="w-3.5 h-3.5" />
-                    <span>🎯 Cuadrar a 0 ({adjustingItem.cant_sistema} CJ)</span>
+                    <span>🎯 Cuadrar a 0 ({adjustCantSistema} CJ)</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => {
                       const orig = adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada;
-                      setAdjustCantContada(orig);
+                      handleAdjustFisicoChange(orig);
                     }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-all cursor-pointer"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
-                    <span>1er Conteo Operador</span>
+                    <span>1er Conteo Operador ({adjustingItem.revision_supervisor?.cant_contada_original ?? adjustingItem.cant_contada})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const origSist = adjustingItem.revision_supervisor?.cant_sistema_original ?? adjustingItem.cant_sistema;
+                      handleAdjustSistemaChange(origSist);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Sistémico SAP Orig ({adjustingItem.revision_supervisor?.cant_sistema_original ?? adjustingItem.cant_sistema})</span>
                   </button>
 
                   {adjustingItem.conciliacion_999?.encontrado && (
