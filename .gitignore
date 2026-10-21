@@ -33,6 +33,7 @@ dist-ssr
 *.xlsm
 *.xls
 *.csv
+!public/Inventario_SDIF_CIAL.xlsx
 # Scripts and python utilities
 scripts/
 *.py

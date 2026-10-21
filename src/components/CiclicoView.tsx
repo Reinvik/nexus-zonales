@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   Boxes, 
   Search, 
@@ -275,20 +276,32 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     let idxUmb = -1;
     let idxLote = -1;
     let idxAlm = -1;
+    let idxTipoAlm = -1;
     let idxVal = -1;
 
     for (let c = 0; c < firstRowCols.length; c++) {
       const colName = firstRowCols[c];
-      if (colName.includes('material') || colName.includes('sku')) idxMat = c;
-      else if (colName.includes('texto') || colName.includes('descrip')) idxDesc = c;
-      else if (colName.includes('libre') || colName.includes('cant')) idxCant = c;
-      else if (colName.includes('umb') || colName.includes('unidad')) idxUmb = c;
-      else if (colName.includes('lote')) idxLote = c;
-      else if (colName.includes('almac') || colName.includes('alm')) idxAlm = c;
-      else if (colName.includes('valor')) idxVal = c;
+      // 1. Descripción primero para que 'descripción material' no sea absorbido por 'material'
+      if (colName.includes('texto') || colName.includes('descrip') || colName.includes('denominac') || colName === 'maktx') {
+        idxDesc = c;
+      } else if (colName.includes('tipo almac') || colName.includes('tip.alm') || colName.includes('tipo alm') || colName === 'nltyp') {
+        idxTipoAlm = c;
+      } else if (colName === 'material' || colName === 'sku' || colName.includes('codigo') || colName.includes('código') || colName === 'matnr' || (colName.includes('material') && !colName.includes('descrip'))) {
+        idxMat = c;
+      } else if (colName.includes('disponible') || colName.includes('libre') || colName.includes('cant') || colName.includes('stock') || colName === 'clabs') {
+        idxCant = c;
+      } else if (colName.includes('umb') || colName.includes('unidad') || colName === 'un' || colName === 'meins') {
+        idxUmb = c;
+      } else if (colName.includes('lote') || colName === 'charg') {
+        idxLote = c;
+      } else if (colName.includes('almac') || colName.includes('alm') || colName === 'lgort') {
+        idxAlm = c;
+      } else if (colName.includes('valor') || colName.includes('peso') || colName.includes('import') || colName === 'dmbtr') {
+        idxVal = c;
+      }
     }
 
-    const hasHeader = idxMat !== -1 || idxDesc !== -1;
+    const hasHeader = idxMat !== -1 || idxDesc !== -1 || idxCant !== -1;
     if (hasHeader) {
       startIdx = 1;
     } else {
@@ -317,12 +330,30 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
       if (!mat || isNaN(Number(mat))) continue;
 
       const desc = idxDesc >= 0 && cols[idxDesc] ? cols[idxDesc] : (cols[1] || 'Sin descripción');
-      const cant = idxCant >= 0 && cols[idxCant] ? parseFloat(cols[idxCant].replace(',', '.')) || 0 : 0;
+      
+      let cant = 0;
+      if (idxCant >= 0 && cols[idxCant]) {
+        const rawCant = cols[idxCant].trim().replace(/\s+/g, '');
+        cant = parseFloat(rawCant.replace(',', '.')) || 0;
+      }
+
       const umb = idxUmb >= 0 && cols[idxUmb] ? cols[idxUmb].toUpperCase() : 'UN';
       const lote = idxLote >= 0 && cols[idxLote] ? cols[idxLote] : '';
-      const rawAlm = idxAlm >= 0 && cols[idxAlm] ? cols[idxAlm].toUpperCase() : defaultAlm;
-      const alm = rawAlm.includes('999') ? '999' : (rawAlm.includes('SDIF') ? 'SDIF' : defaultAlm);
-      const val = idxVal >= 0 && cols[idxVal] ? parseFloat(cols[idxVal].replace(',', '.')) || 0 : 0;
+      
+      let alm = defaultAlm;
+      if (idxTipoAlm >= 0 && cols[idxTipoAlm]?.includes('999')) {
+        alm = '999';
+      } else if (idxAlm >= 0 && cols[idxAlm]) {
+        const rawAlm = cols[idxAlm].toUpperCase();
+        if (rawAlm.includes('999')) alm = '999';
+        else if (rawAlm.includes('SDIF')) alm = 'SDIF';
+        else alm = defaultAlm;
+      }
+
+      let val = 0;
+      if (idxVal >= 0 && cols[idxVal]) {
+        val = parseFloat(cols[idxVal].trim().replace(/\s+/g, '').replace(',', '.')) || 0;
+      }
 
       const prefix = lote.slice(0, 2).toUpperCase();
       const zonal = zonalMap[prefix] || (currentUser ? currentUser.zonal_nombre : 'Santiago');
@@ -342,11 +373,28 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
     }
 
     if (result.length === 0) {
-      errors.push('No se pudieron extraer registros válidos. Asegúrate de incluir el Material/SKU y la cantidad.');
+      errors.push('No se pudieron extraer registros válidos. Verifica que las columnas incluyan el código de Material y la Cantidad o Stock disponible.');
     }
 
     setParsedPreviewMb52(result);
     setParseErrorsMb52(errors);
+  };
+
+  const handleMb52FileUpload = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        const csvText = XLSX.utils.sheet_to_csv(firstSheet, { FS: '\t' });
+        setPastedMb52Text(csvText);
+        parsePastedMb52(csvText, targetAlmacenModal);
+      } catch (err) {
+        setParseErrorsMb52([`Error leyendo archivo Excel: ${err}`]);
+      }
+    };
+    reader.readAsArrayBuffer(file);
   };
 
   const handleConfirmSyncMb52 = async () => {
@@ -892,19 +940,33 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
               </p>
             </div>
 
-            <button
-              onClick={() => {
-                setTargetAlmacenModal(activeSubTab === 'sdif' ? 'SDIF' : '999');
-                setShowMb52Modal(true);
-                setPastedMb52Text('');
-                setParsedPreviewMb52([]);
-                setParseErrorsMb52([]);
-              }}
-              className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black shadow-xs transition-all cursor-pointer"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Actualizar MB52 ({activeSubTab === 'sdif' ? 'SDIF' : '999'})</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {activeSubTab === 'sdif' && (
+                <a
+                  href="/Inventario_SDIF_CIAL.xlsx"
+                  download="Inventario_SDIF_CIAL.xlsx"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#008744] border border-emerald-300 rounded-xl text-xs font-black shadow-xs transition-all active:scale-95 cursor-pointer"
+                  title="Descargar base maestra de inventario SDIF en Excel"
+                >
+                  <Download className="w-4 h-4 text-[#008744]" />
+                  <span>Descargar Base SDIF (.xlsx)</span>
+                </a>
+              )}
+
+              <button
+                onClick={() => {
+                  setTargetAlmacenModal(activeSubTab === 'sdif' ? 'SDIF' : '999');
+                  setShowMb52Modal(true);
+                  setPastedMb52Text('');
+                  setParsedPreviewMb52([]);
+                  setParseErrorsMb52([]);
+                }}
+                className="inline-flex items-center gap-2 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-black shadow-xs transition-all cursor-pointer"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Actualizar MB52 ({activeSubTab === 'sdif' ? 'SDIF' : '999'})</span>
+              </button>
+            </div>
           </div>
 
           {/* Filtros MB52 */}
@@ -1114,14 +1176,47 @@ export const CiclicoView: React.FC<CiclicoViewProps> = ({
             </div>
 
             <div className="p-5 flex-1 overflow-y-auto space-y-4">
+              {/* Opción 1: Subir Archivo Excel o Texto */}
+              <div className="p-4 bg-slate-50 border-2 border-dashed border-slate-300 hover:border-emerald-500 rounded-xl transition-all text-center">
+                <input
+                  type="file"
+                  id="mb52-file-upload"
+                  accept=".xlsx,.xls,.csv,.tsv,.txt"
+                  className="hidden"
+                  onChange={e => {
+                    if (e.target.files?.[0]) {
+                      handleMb52FileUpload(e.target.files[0]);
+                    }
+                  }}
+                />
+                <label
+                  htmlFor="mb52-file-upload"
+                  className="cursor-pointer flex flex-col items-center justify-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-7 h-7 text-emerald-600" />
+                  <span className="text-xs font-bold text-slate-800">
+                    Cargar archivo Excel (.xlsx) o texto exportado de SAP
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    Haz clic aquí para seleccionar el archivo exportado de SAP (MB52 o LX02)
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="h-px bg-slate-200 flex-1" />
+                <span className="text-[10px] font-black uppercase text-slate-400">O pegar texto directamente</span>
+                <div className="h-px bg-slate-200 flex-1" />
+              </div>
+
               <textarea
                 value={pastedMb52Text}
                 onChange={e => {
                   setPastedMb52Text(e.target.value);
                   parsePastedMb52(e.target.value, targetAlmacenModal);
                 }}
-                rows={8}
-                placeholder="Pega aquí los datos de SAP MB52 (Material, Texto breve, Libre utilización, Lote, Almacén, Valor...)"
+                rows={6}
+                placeholder="Pega aquí los datos de SAP MB52 o LX02 (Material, Texto breve, Libre utilización, Lote, Almacén, Valor...)"
                 className="w-full p-3 font-mono text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-[#008744]"
               />
 
